@@ -1,0 +1,53 @@
+plugins {
+    id 'java'
+    id("com.gradleup.shadow") version "9.1.0"
+}
+
+group = 'com.github.mathsanalysis.vshulker'
+version = '1.0.0'
+
+java {
+    toolchain.languageVersion.set(JavaLanguageVersion.of(21))
+}
+
+repositories {
+    mavenCentral()
+
+    maven { url = 'https://jitpack.io' }
+
+    maven {
+        name = "papermc"
+        url = uri("https://repo.papermc.io/repository/maven-public/")
+    }
+}
+
+dependencies {
+    compileOnly 'io.papermc.paper:paper-api:1.21.10-R0.1-SNAPSHOT'
+
+    implementation 'com.github.Revxrsal.Lamp:brigadier:3.3.6'
+    implementation 'com.github.Revxrsal.Lamp:common:3.3.6'
+    implementation 'com.github.Revxrsal.Lamp:bukkit:3.3.6'
+
+}
+
+jar {
+    archiveFileName = 'vshulker.jar'
+}
+
+shadowJar {
+    archiveFileName = 'vshulker.jar'
+    relocate 'revxrsal.commands', 'com.github.mathsanalysis.vshulker.libs.lamp'
+    minimize()
+}
+
+tasks.processResources {
+    def gitHash = providers.exec {
+        commandLine 'git', 'rev-parse', '--short', 'HEAD'
+    }.standardOutput.asText.map { it.trim() }.getOrElse("unknown")
+
+    inputs.property('gitHash', gitHash)
+
+    filesMatching('plugin.yml') {
+        expand('GIT_COMMIT_HASH': gitHash)
+    }
+}

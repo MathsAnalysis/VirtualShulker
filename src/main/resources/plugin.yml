@@ -1,0 +1,5 @@
+name: VirtualShulker
+version: ${GIT_COMMIT_HASH}
+main: com.github.mathsanalysis.vshulker.VirtualShulkerPlugin
+api-version: '1.21'
+author: 'MathsAnalysis'
