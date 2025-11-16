@@ -24,15 +24,13 @@ public final class VirtualShulkerPlugin extends JavaPlugin {
     public void onEnable() {
         instance = this;
 
-        this.manager = VirtualShulkerManager.getInstance();
+        this.manager = VirtualShulkerManager.getInstance(this);
         this.virtualThreadExecutor = Executors.newVirtualThreadPerTaskExecutor();
 
         Config.load(this);
         registerListeners();
         registerCommands();
         startTasks();
-
-        getLogger().info("VirtualShulker abilitato con protezione anti-dupe 1000%!");
     }
 
     @Override
@@ -45,18 +43,19 @@ public final class VirtualShulkerPlugin extends JavaPlugin {
             commandHandler.unregisterAllCommands();
         }
 
+        if (manager != null) {
+            manager.saveData();
+        }
+
         if (virtualThreadExecutor != null) {
             virtualThreadExecutor.shutdown();
         }
-
-        getLogger().info("VirtualShulker disabilitato!");
     }
 
     public void reload() {
         reloadConfig();
         Config.load(this);
         manager.clearData();
-        getLogger().info("VirtualShulker ricaricato!");
     }
 
     public static VirtualShulkerPlugin getInstance() {

@@ -2,11 +2,14 @@ package com.github.mathsanalysis.vshulker.listener;
 
 import com.github.mathsanalysis.vshulker.config.Config;
 import com.github.mathsanalysis.vshulker.manager.VirtualShulkerManager;
+import org.bukkit.Material;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
+import org.bukkit.event.block.Action;
 import org.bukkit.event.entity.EntityDamageEvent;
+import org.bukkit.event.entity.PlayerDeathEvent;
 import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.InventoryCloseEvent;
 import org.bukkit.event.inventory.InventoryDragEvent;
@@ -15,10 +18,33 @@ import org.bukkit.event.player.PlayerDropItemEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.inventory.Inventory;
+import org.bukkit.inventory.ItemStack;
+
+import java.util.Set;
 
 public record ShulkerListener(VirtualShulkerManager manager) implements Listener {
 
-    @EventHandler(priority = EventPriority.NORMAL)
+    private static final Set<Material> SHULKER_BOXES = Set.of(
+            Material.SHULKER_BOX,
+            Material.WHITE_SHULKER_BOX,
+            Material.ORANGE_SHULKER_BOX,
+            Material.MAGENTA_SHULKER_BOX,
+            Material.LIGHT_BLUE_SHULKER_BOX,
+            Material.YELLOW_SHULKER_BOX,
+            Material.LIME_SHULKER_BOX,
+            Material.PINK_SHULKER_BOX,
+            Material.GRAY_SHULKER_BOX,
+            Material.LIGHT_GRAY_SHULKER_BOX,
+            Material.CYAN_SHULKER_BOX,
+            Material.PURPLE_SHULKER_BOX,
+            Material.BLUE_SHULKER_BOX,
+            Material.BROWN_SHULKER_BOX,
+            Material.GREEN_SHULKER_BOX,
+            Material.RED_SHULKER_BOX,
+            Material.BLACK_SHULKER_BOX
+    );
+
+    @EventHandler(priority = EventPriority.HIGHEST)
     public void onPlayerInteract(PlayerInteractEvent event) {
         Player player = event.getPlayer();
 
@@ -26,17 +52,30 @@ public record ShulkerListener(VirtualShulkerManager manager) implements Listener
             return;
         }
 
-        if (!event.getAction().isRightClick()) {
+        if (event.getAction() != Action.RIGHT_CLICK_AIR &&
+                event.getAction() != Action.RIGHT_CLICK_BLOCK) {
             return;
         }
 
+        ItemStack itemInHand = player.getInventory().getItemInMainHand();
+        boolean isMainHand = true;
+
+        if (!isShulkerBox(itemInHand)) {
+            itemInHand = player.getInventory().getItemInOffHand();
+            isMainHand = false;
+            if (!isShulkerBox(itemInHand)) {
+                return;
+            }
+        }
+
         if (!player.hasPermission(Config.PERMISSION_USE)) {
-            player.sendMessage(Config.getMessageNoPermission());
             return;
         }
 
         event.setCancelled(true);
-        manager.openShulker(player);
+
+        // Passa la shulker box al manager per identificazione univoca
+        manager.openShulker(player, itemInHand);
     }
 
     @EventHandler(priority = EventPriority.HIGHEST)
@@ -62,13 +101,36 @@ public record ShulkerListener(VirtualShulkerManager manager) implements Listener
             return;
         }
 
-        Inventory clicked = event.getClickedInventory();
-        if (clicked == null) {
+        if (!manager.isValidSession(player, event.getInventory())) {
+            event.setCancelled(true);
             return;
         }
 
-        if (!manager.isValidSession(player, event.getInventory())) {
+        ItemStack clicked = event.getCurrentItem();
+        ItemStack cursor = event.getCursor();
+        Inventory clickedInv = event.getClickedInventory();
+        Inventory topInv = event.getView().getTopInventory();
+
+        if (isShulkerBox(cursor) && clickedInv != null && clickedInv.equals(topInv)) {
             event.setCancelled(true);
+            return;
+        }
+
+        if (isShulkerBox(clicked) && clickedInv != null && clickedInv.equals(topInv)) {
+            event.setCancelled(true);
+            return;
+        }
+
+        if (event.isShiftClick() && isShulkerBox(clicked)) {
+            event.setCancelled(true);
+            return;
+        }
+
+        if (event.getClick().isKeyboardClick()) {
+            ItemStack hotbarItem = player.getInventory().getItem(event.getHotbarButton());
+            if (isShulkerBox(hotbarItem) || isShulkerBox(clicked)) {
+                event.setCancelled(true);
+            }
         }
     }
 
@@ -83,6 +145,12 @@ public record ShulkerListener(VirtualShulkerManager manager) implements Listener
         }
 
         if (!manager.isValidSession(player, event.getInventory())) {
+            event.setCancelled(true);
+            return;
+        }
+
+        ItemStack dragged = event.getOldCursor();
+        if (isShulkerBox(dragged)) {
             event.setCancelled(true);
         }
     }
@@ -121,8 +189,9 @@ public record ShulkerListener(VirtualShulkerManager manager) implements Listener
             return;
         }
 
-        if (player.getOpenInventory().getTopInventory().equals(event.getPlayer().getInventory())) {
-            return;
+        ItemStack droppedItem = event.getItemDrop().getItemStack();
+        if (isShulkerBox(droppedItem)) {
+            event.setCancelled(true);
         }
     }
 
@@ -150,5 +219,18 @@ public record ShulkerListener(VirtualShulkerManager manager) implements Listener
         if (manager.hasOpenShulker(player)) {
             manager.closeShulker(player, true);
         }
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onPlayerDeath(PlayerDeathEvent event) {
+        Player player = event.getEntity();
+
+        if (manager.hasOpenShulker(player)) {
+            manager.closeShulker(player, true);
+        }
+    }
+
+    private static boolean isShulkerBox(ItemStack item) {
+        return item != null && SHULKER_BOXES.contains(item.getType());
     }
 }

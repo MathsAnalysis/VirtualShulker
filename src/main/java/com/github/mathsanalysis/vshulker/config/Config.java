@@ -14,9 +14,6 @@ public final class Config {
 
     private static int shulkerSize;
     private static String shulkerTitle;
-    private static String messageOpened;
-    private static String messageClosed;
-    private static String messageClosedDamage;
     private static String messageNoPermission;
     private static String messageReload;
 
@@ -43,9 +40,6 @@ public final class Config {
         shulkerSize = config.getInt("shulker.size", 27);
         shulkerTitle = config.getString("shulker.title", "<gold><bold>Virtual Shulker");
 
-        messageOpened = config.getString("messages.opened", "<green>Shulker aperto!");
-        messageClosed = config.getString("messages.closed", "<red>Shulker chiuso!");
-        messageClosedDamage = config.getString("messages.closed-damage", "<red>Shulker chiuso automaticamente per danno subito!");
         messageNoPermission = config.getString("messages.no-permission", "<red>Non hai il permesso per usare questo comando!");
         messageReload = config.getString("messages.reload", "<green>Plugin ricaricato con successo!");
 
@@ -93,18 +87,6 @@ public final class Config {
 
     public static Component getShulkerTitle() {
         return MessageUtil.parseMessage(shulkerTitle);
-    }
-
-    public static Component getMessageOpened() {
-        return MessageUtil.parseMessage(messageOpened);
-    }
-
-    public static Component getMessageClosed() {
-        return MessageUtil.parseMessage(messageClosed);
-    }
-
-    public static Component getMessageClosedDamage() {
-        return MessageUtil.parseMessage(messageClosedDamage);
     }
 
     public static Component getMessageNoPermission() {
