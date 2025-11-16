@@ -5,6 +5,8 @@ import net.kyori.adventure.text.Component;
 import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.plugin.java.JavaPlugin;
 
+import java.io.FileWriter;
+
 public final class Config {
 
     public static String PERMISSION_USE;
@@ -23,28 +25,66 @@ public final class Config {
             plugin.getDataFolder().mkdirs();
         }
 
-        boolean configExists = new java.io.File(plugin.getDataFolder(), "config.yml").exists();
-        plugin.saveDefaultConfig();
+        java.io.File configFile = new java.io.File(plugin.getDataFolder(), "config.yml");
 
-        if (!configExists) {
-            plugin.getLogger().info("Config file created with default settings.");
-            plugin.reloadConfig();
-            return;
+        if (!configFile.exists()) {
+            try {
+                plugin.saveDefaultConfig();
+                plugin.getLogger().info("Config file created from resources.");
+            } catch (IllegalArgumentException e) {
+                plugin.getLogger().warning("config.yml not found in resources, creating manually...");
+                createDefaultConfig(configFile);
+            }
         }
 
+        plugin.reloadConfig();
         FileConfiguration config = plugin.getConfig();
 
         shulkerSize = config.getInt("shulker.size", 27);
-        shulkerTitle = config.getString("shulker.title", "&6Virtual Shulker");
+        shulkerTitle = config.getString("shulker.title", "<gold><bold>Virtual Shulker");
 
-        messageOpened = config.getString("messages.opened", "&aShulker aperto!");
-        messageClosed = config.getString("messages.closed", "&cShulker chiuso!");
-        messageClosedDamage = config.getString("messages.closed-damage", "&cShulker chiuso per danno!");
-        messageNoPermission = config.getString("messages.no-permission", "&cNon hai il permesso!");
-        messageReload = config.getString("messages.reload", "&aPlugin ricaricato!");
+        messageOpened = config.getString("messages.opened", "<green>Shulker aperto!");
+        messageClosed = config.getString("messages.closed", "<red>Shulker chiuso!");
+        messageClosedDamage = config.getString("messages.closed-damage", "<red>Shulker chiuso automaticamente per danno subito!");
+        messageNoPermission = config.getString("messages.no-permission", "<red>Non hai il permesso per usare questo comando!");
+        messageReload = config.getString("messages.reload", "<green>Plugin ricaricato con successo!");
 
         PERMISSION_USE = config.getString("permissions.use", "virtualshulker.use");
         PERMISSION_ADMIN = config.getString("permissions.admin", "virtualshulker.admin");
+
+        plugin.getLogger().info("Config caricato: size=" + shulkerSize + ", permissions.use=" + PERMISSION_USE);
+    }
+
+    private static void createDefaultConfig(java.io.File configFile) {
+        try {
+            FileWriter writer = new FileWriter(configFile);
+
+            writer.write("# Settings file for VirtualShulker\n");
+            writer.write("shulker:\n");
+            writer.write("  # Dimensione inventario (deve essere multiplo di 9: 9, 18, 27, 36, 45, 54)\n");
+            writer.write("  size: 27\n");
+            writer.write("  # Titolo dell'inventario (supporta MiniMessage e legacy color codes)\n");
+            writer.write("  title: \"<gold><bold>Virtual Shulker\"\n\n");
+
+            writer.write("# Messages Support minimessage and legacy\n");
+            writer.write("messages:\n");
+            writer.write("  opened: \"<green>Shulker aperto!\"\n");
+            writer.write("  closed: \"<red>Shulker chiuso!\"\n");
+            writer.write("  closed-damage: \"<red>Shulker chiuso automaticamente per danno subito!\"\n");
+            writer.write("  no-permission: \"<red>Non hai il permesso per usare questo comando!\"\n");
+            writer.write("  reload: \"<green>Plugin ricaricato con successo!\"\n\n");
+
+            writer.write("# Permissions plugin\n");
+            writer.write("permissions:\n");
+            writer.write("  # Permesso per usare la shulker (shift + right-click)\n");
+            writer.write("  use: \"virtualshulker.use\"\n");
+            writer.write("  # Permesso per comandi admin\n");
+            writer.write("  admin: \"virtualshulker.admin\"\n");
+
+            writer.close();
+        } catch (java.io.IOException e) {
+            throw new RuntimeException("Failed to create default config.yml", e);
+        }
     }
 
     public static int getShulkerSize() {
