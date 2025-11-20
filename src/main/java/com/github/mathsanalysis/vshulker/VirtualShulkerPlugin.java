@@ -5,6 +5,7 @@ import com.github.mathsanalysis.vshulker.config.Config;
 import com.github.mathsanalysis.vshulker.listener.ShulkerListener;
 import com.github.mathsanalysis.vshulker.manager.VirtualShulkerManager;
 import com.github.mathsanalysis.vshulker.tasks.SessionCleanupTask;
+import com.github.mathsanalysis.vshulker.tasks.ShulkerPreviewUpdateTask;
 import org.bukkit.plugin.java.JavaPlugin;
 import revxrsal.commands.bukkit.BukkitCommandHandler;
 
@@ -81,5 +82,8 @@ public final class VirtualShulkerPlugin extends JavaPlugin {
     private void startTasks() {
         cleanupTask = new SessionCleanupTask(this, manager);
         cleanupTask.start();
+
+        ShulkerPreviewUpdateTask previewTask = new ShulkerPreviewUpdateTask(this, manager);
+        previewTask.start();
     }
 }
