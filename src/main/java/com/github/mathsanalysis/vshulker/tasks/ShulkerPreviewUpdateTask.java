@@ -89,6 +89,6 @@ public final class ShulkerPreviewUpdateTask extends BukkitRunnable {
     }
 
     public void start() {
-        this.runTaskTimerAsynchronously(plugin, 20L, 20L);
+        this.runTaskTimer(plugin, 20L, 20L);
     }
 }

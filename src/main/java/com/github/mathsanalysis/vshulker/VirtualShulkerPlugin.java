@@ -3,6 +3,7 @@ package com.github.mathsanalysis.vshulker;
 import com.github.mathsanalysis.vshulker.command.ShulkerCommand;
 import com.github.mathsanalysis.vshulker.config.Config;
 import com.github.mathsanalysis.vshulker.listener.ShulkerListener;
+import com.github.mathsanalysis.vshulker.listener.ShulkerPlaceListener;
 import com.github.mathsanalysis.vshulker.manager.VirtualShulkerManager;
 import com.github.mathsanalysis.vshulker.tasks.SessionCleanupTask;
 import com.github.mathsanalysis.vshulker.tasks.ShulkerPreviewUpdateTask;
@@ -70,6 +71,11 @@ public final class VirtualShulkerPlugin extends JavaPlugin {
     private void registerListeners() {
         getServer().getPluginManager().registerEvents(
                 new ShulkerListener(manager),
+                this
+        );
+
+        getServer().getPluginManager().registerEvents(
+                new ShulkerPlaceListener(this, manager),
                 this
         );
     }

@@ -99,6 +99,10 @@ public final class VirtualShulkerManager {
     }
 
     public void closeShulker(Player player, boolean save) {
+        closeShulker(player, save, false);
+    }
+
+    public void closeShulker(Player player, boolean save, boolean synchronous) {
         UUID playerId = player.getUniqueId();
         ReentrantLock lock = playerLocks.get(playerId);
 
@@ -109,6 +113,7 @@ public final class VirtualShulkerManager {
         lock.lock();
         try {
             ShulkerSession session = activeSessions.remove(playerId);
+            openedShulkerItems.remove(playerId);
 
             if (session == null) {
                 return;
@@ -116,73 +121,65 @@ public final class VirtualShulkerManager {
 
             if (save) {
                 saveInventory(session.shulkerId, session.inventory);
-                saveDataAsync();
 
-                Bukkit.getScheduler().runTask(plugin, () -> {
-                    ItemStack shulkerInHand = player.getInventory().getItemInMainHand();
-                    if (isShulkerBox(shulkerInHand)) {
-                        ItemMeta meta = shulkerInHand.getItemMeta();
-                        if (meta != null) {
-                            PersistentDataContainer pdc = meta.getPersistentDataContainer();
-                            String itemShulkerId = pdc.get(shulkerIdKey, PersistentDataType.STRING);
+                updateShulkerNBTForPlayer(player, session.shulkerId, session.inventory.getContents());
 
-                            if (itemShulkerId != null && itemShulkerId.equals(session.shulkerId)) {
-                                updateShulkerNBT(shulkerInHand, session.inventory.getContents());
-                                return;
-                            }
-                        }
-                    }
-
-                    ItemStack shulkerOffHand = player.getInventory().getItemInOffHand();
-                    if (isShulkerBox(shulkerOffHand)) {
-                        ItemMeta meta = shulkerOffHand.getItemMeta();
-                        if (meta != null) {
-                            PersistentDataContainer pdc = meta.getPersistentDataContainer();
-                            String itemShulkerId = pdc.get(shulkerIdKey, PersistentDataType.STRING);
-
-                            if (itemShulkerId != null && itemShulkerId.equals(session.shulkerId)) {
-                                updateShulkerNBT(shulkerOffHand, session.inventory.getContents());
-                                return;
-                            }
-                        }
-                    }
-
-                    for (ItemStack item : player.getInventory().getContents()) {
-                        if (isShulkerBox(item)) {
-                            ItemMeta meta = item.getItemMeta();
-                            if (meta != null) {
-                                PersistentDataContainer pdc = meta.getPersistentDataContainer();
-                                String itemShulkerId = pdc.get(shulkerIdKey, PersistentDataType.STRING);
-
-                                if (itemShulkerId != null && itemShulkerId.equals(session.shulkerId)) {
-                                    updateShulkerNBT(item, session.inventory.getContents());
-                                    return;
-                                }
-                            }
-                        }
-                    }
-
-                    for (ItemStack item : player.getEnderChest().getContents()) {
-                        if (isShulkerBox(item)) {
-                            ItemMeta meta = item.getItemMeta();
-                            if (meta != null) {
-                                PersistentDataContainer pdc = meta.getPersistentDataContainer();
-                                String itemShulkerId = pdc.get(shulkerIdKey, PersistentDataType.STRING);
-
-                                if (itemShulkerId != null && itemShulkerId.equals(session.shulkerId)) {
-                                    updateShulkerNBT(item, session.inventory.getContents());
-                                    return;
-                                }
-                            }
-                        }
-                    }
-                });
+                if (synchronous) {
+                    saveData();
+                } else {
+                    saveDataAsync();
+                }
             }
 
             player.closeInventory();
         } finally {
             lock.unlock();
         }
+    }
+
+    private void updateShulkerNBTForPlayer(Player player, String shulkerId, ItemStack[] contents) {
+        ItemStack shulkerInHand = player.getInventory().getItemInMainHand();
+        if (tryUpdateShulkerNBT(shulkerInHand, shulkerId, contents)) {
+            return;
+        }
+
+        ItemStack shulkerOffHand = player.getInventory().getItemInOffHand();
+        if (tryUpdateShulkerNBT(shulkerOffHand, shulkerId, contents)) {
+            return;
+        }
+
+        for (ItemStack item : player.getInventory().getContents()) {
+            if (tryUpdateShulkerNBT(item, shulkerId, contents)) {
+                return;
+            }
+        }
+
+        for (ItemStack item : player.getEnderChest().getContents()) {
+            if (tryUpdateShulkerNBT(item, shulkerId, contents)) {
+                return;
+            }
+        }
+    }
+
+    private boolean tryUpdateShulkerNBT(ItemStack item, String targetShulkerId, ItemStack[] contents) {
+        if (!isShulkerBox(item)) {
+            return false;
+        }
+
+        ItemMeta meta = item.getItemMeta();
+        if (meta == null) {
+            return false;
+        }
+
+        PersistentDataContainer pdc = meta.getPersistentDataContainer();
+        String itemShulkerId = pdc.get(shulkerIdKey, PersistentDataType.STRING);
+
+        if (itemShulkerId != null && itemShulkerId.equals(targetShulkerId)) {
+            updateShulkerNBT(item, contents);
+            return true;
+        }
+
+        return false;
     }
 
     public void closeShulkerOnDamage(Player player) {
@@ -202,13 +199,10 @@ public final class VirtualShulkerManager {
             }
 
             saveInventory(session.shulkerId, session.inventory);
-            saveDataAsync();
+            updateShulkerNBTForPlayer(player, session.shulkerId, session.inventory.getContents());
+            saveData();
 
-            ItemStack shulkerItem = openedShulkerItems.remove(playerId);
-            if (shulkerItem != null) {
-                updateShulkerNBT(shulkerItem, session.inventory.getContents());
-            }
-
+            openedShulkerItems.remove(playerId);
             player.closeInventory();
         } finally {
             lock.unlock();
@@ -412,8 +406,7 @@ public final class VirtualShulkerManager {
             return;
         }
 
-        try (FileInputStream fis = new FileInputStream(dataFile);
-             BukkitObjectInputStream ois = new BukkitObjectInputStream(fis)) {
+        try (FileInputStream fis = new FileInputStream(dataFile); BukkitObjectInputStream ois = new BukkitObjectInputStream(fis)) {
 
             int size = ois.readInt();
 

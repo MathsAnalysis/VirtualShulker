@@ -74,7 +74,6 @@ public record ShulkerListener(VirtualShulkerManager manager) implements Listener
 
         event.setCancelled(true);
 
-        // Passa la shulker box al manager per identificazione univoca
         manager.openShulker(player, itemInHand);
     }
 
@@ -212,21 +211,21 @@ public record ShulkerListener(VirtualShulkerManager manager) implements Listener
         manager.closeShulker(player, true);
     }
 
-    @EventHandler(priority = EventPriority.MONITOR)
+    @EventHandler(priority = EventPriority.LOWEST)
     public void onPlayerQuit(PlayerQuitEvent event) {
         Player player = event.getPlayer();
 
         if (manager.hasOpenShulker(player)) {
-            manager.closeShulker(player, true);
+            manager.closeShulker(player, true, true);
         }
     }
 
-    @EventHandler(priority = EventPriority.MONITOR)
+    @EventHandler(priority = EventPriority.LOWEST)
     public void onPlayerDeath(PlayerDeathEvent event) {
         Player player = event.getEntity();
 
         if (manager.hasOpenShulker(player)) {
-            manager.closeShulker(player, true);
+            manager.closeShulker(player, true, true);
         }
     }
 
