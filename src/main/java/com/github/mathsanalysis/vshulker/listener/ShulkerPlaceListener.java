@@ -70,20 +70,19 @@ public class ShulkerPlaceListener implements Listener {
 
         ItemStack[] savedContents = manager.getShulkerContents(shulkerId);
 
+        if (savedContents == null) {
+            return;
+        }
+
         plugin.getServer().getScheduler().runTask(plugin, () -> {
             if (!(event.getBlock().getState() instanceof ShulkerBox shulkerBlock)) {
                 return;
             }
 
-            if (savedContents != null) {
-                shulkerBlock.getInventory().setContents(savedContents);
-                plugin.getLogger().info("Sync shulker place: " + shulkerId);
-            } else {
-                shulkerBlock.getInventory().clear();
-                plugin.getLogger().warning("Shulker " + shulkerId + " place but no contents found! Clearing inventory.");
-            }
-            
+            shulkerBlock.getInventory().setContents(savedContents);
             shulkerBlock.update();
+
+            plugin.getLogger().info("Sincronizzati contenuti shulker piazzata: " + shulkerId);
         });
     }
 }
