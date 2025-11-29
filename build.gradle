@@ -28,6 +28,7 @@ dependencies {
     implementation 'com.github.Revxrsal.Lamp:common:3.3.6'
     implementation 'com.github.Revxrsal.Lamp:bukkit:3.3.6'
 
+    implementation 'org.xerial:sqlite-jdbc:3.51.0.0'
 }
 
 jar {

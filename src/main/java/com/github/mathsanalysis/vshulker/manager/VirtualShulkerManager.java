@@ -4,6 +4,7 @@ import com.github.mathsanalysis.vshulker.VirtualShulkerPlugin;
 import com.github.mathsanalysis.vshulker.config.Config;
 import net.kyori.adventure.text.Component;
 import org.bukkit.Bukkit;
+import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
 import org.bukkit.entity.Player;
@@ -14,11 +15,9 @@ import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.block.ShulkerBox;
 import org.bukkit.persistence.PersistentDataContainer;
 import org.bukkit.persistence.PersistentDataType;
-import org.bukkit.util.io.BukkitObjectInputStream;
-import org.bukkit.util.io.BukkitObjectOutputStream;
 
-import java.io.*;
 import java.util.*;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantLock;
 
@@ -28,24 +27,36 @@ public final class VirtualShulkerManager {
 
     private final VirtualShulkerPlugin plugin;
     private final NamespacedKey shulkerIdKey;
-    private final File dataFile;
+    private final DatabaseManager database;
 
-    private final Map<String, ItemStack[]> shulkerData;
+    private final Map<String, UUID> shulkerLocks;
+    private final Set<String> lockedShulkerIds;
+
+    private final Set<Location> placedShulkerLocations;
+
+    private final Map<UUID, Map<String, ItemStack[]>> playerCache;
+    private final Map<UUID, Set<String>> playerShulkerIds;
+
     private final Map<UUID, ShulkerSession> activeSessions;
-    private final Map<UUID, ReentrantLock> playerLocks;
+    private final Set<UUID> loadingPlayers;
     private final Map<UUID, ItemStack> openedShulkerItems;
+
+    private final ReentrantLock globalLock = new ReentrantLock();
 
     private VirtualShulkerManager(VirtualShulkerPlugin plugin) {
         this.plugin = plugin;
         this.shulkerIdKey = new NamespacedKey(plugin, "shulker_id");
-        this.dataFile = new File(plugin.getDataFolder(), "shulkers.dat");
+        this.database = new DatabaseManager(plugin);
 
-        this.shulkerData = new ConcurrentHashMap<>();
+        this.shulkerLocks = new ConcurrentHashMap<>();
+        this.lockedShulkerIds = ConcurrentHashMap.newKeySet();
+        this.placedShulkerLocations = ConcurrentHashMap.newKeySet();
+
+        this.playerCache = new ConcurrentHashMap<>();
+        this.playerShulkerIds = new ConcurrentHashMap<>();
         this.activeSessions = new ConcurrentHashMap<>();
-        this.playerLocks = new ConcurrentHashMap<>();
+        this.loadingPlayers = ConcurrentHashMap.newKeySet();
         this.openedShulkerItems = new ConcurrentHashMap<>();
-
-        loadData();
     }
 
     public static VirtualShulkerManager getInstance(VirtualShulkerPlugin plugin) {
@@ -59,43 +70,246 @@ public final class VirtualShulkerManager {
         return instance;
     }
 
+    public NamespacedKey getShulkerIdKey() {
+        return shulkerIdKey;
+    }
+
+    public CompletableFuture<Void> initialize() {
+        return database.initialize()
+                .thenCompose(v -> database.migrateFromDatFile())
+                .thenRun(() -> {
+                    for (Player player : Bukkit.getOnlinePlayers()) {
+                        loadPlayerCache(player);
+                    }
+                    plugin.getLogger().info("Database ready, anti-dupe protection active");
+                });
+    }
+
+    private boolean tryLockShulker(String shulkerId, UUID playerId) {
+        globalLock.lock();
+        try {
+            if (lockedShulkerIds.contains(shulkerId)) {
+                return false;
+            }
+
+            UUID currentHolder = shulkerLocks.get(shulkerId);
+            if (currentHolder != null && !currentHolder.equals(playerId)) {
+                return false;
+            }
+
+            lockedShulkerIds.add(shulkerId);
+            return true;
+        } finally {
+            globalLock.unlock();
+        }
+    }
+
+    private void confirmLock(String shulkerId, UUID playerId) {
+        globalLock.lock();
+        try {
+            lockedShulkerIds.remove(shulkerId);
+            shulkerLocks.put(shulkerId, playerId);
+        } finally {
+            globalLock.unlock();
+        }
+    }
+
+    private void releaseLock(String shulkerId) {
+        globalLock.lock();
+        try {
+            lockedShulkerIds.remove(shulkerId);
+            shulkerLocks.remove(shulkerId);
+        } finally {
+            globalLock.unlock();
+        }
+    }
+
+    public boolean isShulkerInUse(String shulkerId) {
+        return shulkerLocks.containsKey(shulkerId) || lockedShulkerIds.contains(shulkerId);
+    }
+
+    public void registerPlacedShulker(Location location) {
+        placedShulkerLocations.add(location.getBlock().getLocation());
+    }
+
+    public void unregisterPlacedShulker(Location location) {
+        placedShulkerLocations.remove(location.getBlock().getLocation());
+    }
+
+    public boolean isPlacedVirtualShulker(Location location) {
+        return placedShulkerLocations.contains(location.getBlock().getLocation());
+    }
+
+    public void loadPlayerCache(Player player) {
+        UUID playerId = player.getUniqueId();
+
+        if (playerCache.containsKey(playerId)) {
+            return;
+        }
+
+        playerCache.put(playerId, new ConcurrentHashMap<>());
+        playerShulkerIds.put(playerId, ConcurrentHashMap.newKeySet());
+
+        CompletableFuture.runAsync(() -> {
+            Set<String> shulkerIds = new HashSet<>();
+
+            for (ItemStack item : player.getInventory().getContents()) {
+                String id = getShulkerIdFromItem(item);
+                if (id != null) shulkerIds.add(id);
+            }
+
+            for (ItemStack item : player.getEnderChest().getContents()) {
+                String id = getShulkerIdFromItem(item);
+                if (id != null) shulkerIds.add(id);
+            }
+
+            for (String shulkerId : shulkerIds) {
+                ItemStack[] contents = database.loadShulkerSync(shulkerId);
+                if (contents != null) {
+                    Map<String, ItemStack[]> cache = playerCache.get(playerId);
+                    if (cache != null) {
+                        cache.put(shulkerId, contents);
+                        playerShulkerIds.computeIfAbsent(playerId, k -> ConcurrentHashMap.newKeySet()).add(shulkerId);
+                    }
+                }
+            }
+
+            if (!shulkerIds.isEmpty()) {
+                plugin.getLogger().info("Loaded " + shulkerIds.size() + " shulkers for " + player.getName());
+            }
+        }, plugin.getVirtualThreadExecutor());
+    }
+
+    public void unloadPlayerCache(Player player) {
+        UUID playerId = player.getUniqueId();
+
+        shulkerLocks.entrySet().removeIf(entry -> entry.getValue().equals(playerId));
+
+        Map<String, ItemStack[]> cache = playerCache.remove(playerId);
+        playerShulkerIds.remove(playerId);
+
+        if (cache != null && !cache.isEmpty()) {
+            for (Map.Entry<String, ItemStack[]> entry : cache.entrySet()) {
+                database.saveShulkerSync(entry.getKey(), entry.getValue());
+            }
+            plugin.getLogger().info("Saved " + cache.size() + " shulkers for " + player.getName());
+        }
+    }
+
+    public String getShulkerIdFromItem(ItemStack item) {
+        if (!isShulkerBox(item)) return null;
+
+        ItemMeta meta = item.getItemMeta();
+        if (meta == null) return null;
+
+        PersistentDataContainer pdc = meta.getPersistentDataContainer();
+        return pdc.get(shulkerIdKey, PersistentDataType.STRING);
+    }
+
     public void openShulker(Player player, ItemStack shulkerBox) {
         if (!isShulkerBox(shulkerBox)) {
             return;
         }
 
         UUID playerId = player.getUniqueId();
-        ReentrantLock lock = playerLocks.computeIfAbsent(playerId, k -> new ReentrantLock());
 
-        lock.lock();
-        try {
-            if (activeSessions.containsKey(playerId)) {
+        if (activeSessions.containsKey(playerId) || loadingPlayers.contains(playerId)) {
+            return;
+        }
+
+        String shulkerId = getOrCreateShulkerId(shulkerBox);
+
+        if (!tryLockShulker(shulkerId, playerId)) {
+            plugin.getLogger().warning("Blocked duplicate shulker access: " + shulkerId + " by " + player.getName());
+            return;
+        }
+
+        loadingPlayers.add(playerId);
+        ItemStack shulkerClone = shulkerBox.clone();
+
+        Map<String, ItemStack[]> cache = playerCache.get(playerId);
+        if (cache != null) {
+            ItemStack[] cached = cache.get(shulkerId);
+            if (cached != null) {
+                Bukkit.getScheduler().runTask(plugin, () ->
+                        finalizeOpen(player, shulkerId, shulkerClone, cloneContents(cached))
+                );
+                return;
+            }
+        }
+
+        database.loadShulker(shulkerId).thenAccept(contents -> {
+            if (!player.isOnline()) {
+                loadingPlayers.remove(playerId);
+                releaseLock(shulkerId);
                 return;
             }
 
-            String shulkerId = getOrCreateShulkerId(shulkerBox);
-            ItemStack[] contents = loadInventory(shulkerId);
+            ItemStack[] finalContents;
 
-            if (contents == null) {
-                contents = extractFromNBT(shulkerBox);
-                if (contents != null) {
-                    shulkerData.put(shulkerId, cloneContents(contents));
-                    saveDataAsync();
-                    plugin.getLogger().info("Estratti dati NBT per shulker: " + shulkerId);
+            if (contents != null) {
+                if (cache != null) {
+                    cache.put(shulkerId, contents);
+                    playerShulkerIds.computeIfAbsent(playerId, k -> ConcurrentHashMap.newKeySet()).add(shulkerId);
                 }
+                finalContents = cloneContents(contents);
+            } else {
+                ItemStack[] nbtContents = extractFromNBT(shulkerClone);
+                if (nbtContents != null) {
+                    if (cache != null) {
+                        cache.put(shulkerId, cloneContents(nbtContents));
+                        playerShulkerIds.computeIfAbsent(playerId, k -> ConcurrentHashMap.newKeySet()).add(shulkerId);
+                    }
+                    database.saveShulker(shulkerId, nbtContents);
+                }
+                finalContents = nbtContents;
             }
 
-            Inventory inventory = createInventory(contents);
+            Bukkit.getScheduler().runTask(plugin, () ->
+                    finalizeOpen(player, shulkerId, shulkerClone, finalContents)
+            );
+        }).exceptionally(ex -> {
+            plugin.getLogger().warning("Error loading shulker: " + ex.getMessage());
+            loadingPlayers.remove(playerId);
+            releaseLock(shulkerId);
+            return null;
+        });
+    }
 
-            ShulkerSession session = new ShulkerSession(inventory, shulkerId, System.currentTimeMillis());
-            activeSessions.put(playerId, session);
+    private void finalizeOpen(Player player, String shulkerId, ItemStack shulkerBox, ItemStack[] contents) {
+        UUID playerId = player.getUniqueId();
 
-            openedShulkerItems.put(playerId, shulkerBox.clone());
+        loadingPlayers.remove(playerId);
 
-            player.openInventory(inventory);
-        } finally {
-            lock.unlock();
+        if (!player.isOnline() || activeSessions.containsKey(playerId)) {
+            releaseLock(shulkerId);
+            return;
         }
+
+        confirmLock(shulkerId, playerId);
+
+        Inventory inventory = createInventory(contents);
+
+        ShulkerSession session = new ShulkerSession(inventory, shulkerId, System.currentTimeMillis());
+        activeSessions.put(playerId, session);
+
+        openedShulkerItems.put(playerId, shulkerBox);
+
+        player.openInventory(inventory);
+    }
+
+    public boolean isLoading(Player player) {
+        return loadingPlayers.contains(player.getUniqueId());
+    }
+
+    public void cancelLoading(Player player) {
+        UUID playerId = player.getUniqueId();
+        loadingPlayers.remove(playerId);
+
+        lockedShulkerIds.removeIf(id -> {
+            UUID holder = shulkerLocks.get(id);
+            return holder != null && holder.equals(playerId);
+        });
     }
 
     public void closeShulker(Player player, boolean save) {
@@ -104,47 +318,41 @@ public final class VirtualShulkerManager {
 
     public void closeShulker(Player player, boolean save, boolean synchronous) {
         UUID playerId = player.getUniqueId();
-        ReentrantLock lock = playerLocks.get(playerId);
 
-        if (lock == null) {
+        ShulkerSession session = activeSessions.remove(playerId);
+        openedShulkerItems.remove(playerId);
+        loadingPlayers.remove(playerId);
+
+        if (session == null) {
             return;
         }
 
-        lock.lock();
-        try {
-            ShulkerSession session = activeSessions.remove(playerId);
-            openedShulkerItems.remove(playerId);
+        releaseLock(session.shulkerId);
 
-            if (session == null) {
-                return;
+        if (save) {
+            ItemStack[] contents = session.inventory.getContents();
+
+            Map<String, ItemStack[]> cache = playerCache.get(playerId);
+            if (cache != null) {
+                cache.put(session.shulkerId, cloneContents(contents));
             }
 
-            if (save) {
-                saveInventory(session.shulkerId, session.inventory);
+            updateShulkerNBTForPlayer(player, session.shulkerId, contents);
 
-                updateShulkerNBTForPlayer(player, session.shulkerId, session.inventory.getContents());
-
-                if (synchronous) {
-                    saveData();
-                } else {
-                    saveDataAsync();
-                }
+            if (synchronous) {
+                database.saveShulkerSync(session.shulkerId, contents);
+            } else {
+                database.saveShulker(session.shulkerId, contents);
             }
-
-            player.closeInventory();
-        } finally {
-            lock.unlock();
         }
     }
 
     private void updateShulkerNBTForPlayer(Player player, String shulkerId, ItemStack[] contents) {
-        ItemStack shulkerInHand = player.getInventory().getItemInMainHand();
-        if (tryUpdateShulkerNBT(shulkerInHand, shulkerId, contents)) {
+        if (tryUpdateShulkerNBT(player.getInventory().getItemInMainHand(), shulkerId, contents)) {
             return;
         }
 
-        ItemStack shulkerOffHand = player.getInventory().getItemInOffHand();
-        if (tryUpdateShulkerNBT(shulkerOffHand, shulkerId, contents)) {
+        if (tryUpdateShulkerNBT(player.getInventory().getItemInOffHand(), shulkerId, contents)) {
             return;
         }
 
@@ -184,29 +392,28 @@ public final class VirtualShulkerManager {
 
     public void closeShulkerOnDamage(Player player) {
         UUID playerId = player.getUniqueId();
-        ReentrantLock lock = playerLocks.get(playerId);
 
-        if (lock == null) {
+        ShulkerSession session = activeSessions.remove(playerId);
+        loadingPlayers.remove(playerId);
+
+        if (session == null) {
             return;
         }
 
-        lock.lock();
-        try {
-            ShulkerSession session = activeSessions.remove(playerId);
+        releaseLock(session.shulkerId);
 
-            if (session == null) {
-                return;
-            }
+        ItemStack[] contents = session.inventory.getContents();
 
-            saveInventory(session.shulkerId, session.inventory);
-            updateShulkerNBTForPlayer(player, session.shulkerId, session.inventory.getContents());
-            saveData();
-
-            openedShulkerItems.remove(playerId);
-            player.closeInventory();
-        } finally {
-            lock.unlock();
+        Map<String, ItemStack[]> cache = playerCache.get(playerId);
+        if (cache != null) {
+            cache.put(session.shulkerId, cloneContents(contents));
         }
+
+        updateShulkerNBTForPlayer(player, session.shulkerId, contents);
+        database.saveShulkerSync(session.shulkerId, contents);
+
+        openedShulkerItems.remove(playerId);
+        player.closeInventory();
     }
 
     public boolean hasOpenShulker(Player player) {
@@ -218,9 +425,35 @@ public final class VirtualShulkerManager {
         return session != null && session.inventory.equals(inventory);
     }
 
+    public String getOpenShulkerId(Player player) {
+        ShulkerSession session = activeSessions.get(player.getUniqueId());
+        return session != null ? session.shulkerId : null;
+    }
+
     public ItemStack[] getShulkerContents(String shulkerId) {
-        ItemStack[] original = shulkerData.get(shulkerId);
-        return original != null ? cloneContents(original) : null;
+        for (Map<String, ItemStack[]> cache : playerCache.values()) {
+            ItemStack[] contents = cache.get(shulkerId);
+            if (contents != null) {
+                return cloneContents(contents);
+            }
+        }
+
+        ItemStack[] fromDb = database.loadShulkerSync(shulkerId);
+        return fromDb != null ? cloneContents(fromDb) : null;
+    }
+
+    public void updateShulkerData(String shulkerId, ItemStack[] contents) {
+        ItemStack[] cloned = cloneContents(contents);
+
+        for (Map.Entry<UUID, Set<String>> entry : playerShulkerIds.entrySet()) {
+            if (entry.getValue().contains(shulkerId)) {
+                Map<String, ItemStack[]> cache = playerCache.get(entry.getKey());
+                if (cache != null) {
+                    cache.put(shulkerId, cloned);
+                }
+            }
+        }
+        database.saveShulkerSync(shulkerId, contents);
     }
 
     private ItemStack[] extractFromNBT(ItemStack shulkerBox) {
@@ -243,13 +476,9 @@ public final class VirtualShulkerManager {
                 }
             }
 
-            if (!hasItems) {
-                return null;
-            }
-
-            return contents;
+            return hasItems ? contents : null;
         } catch (Exception e) {
-            plugin.getLogger().warning("Errore estrazione NBT da shulker: " + e.getMessage());
+            plugin.getLogger().warning("Error extracting NBT from shulker: " + e.getMessage());
             return null;
         }
     }
@@ -266,32 +495,12 @@ public final class VirtualShulkerManager {
 
             blockMeta.setBlockState(box);
             shulkerBox.setItemMeta(blockMeta);
-
-            plugin.getLogger().info("Aggiornati dati NBT della shulker");
         } catch (Exception e) {
-            plugin.getLogger().warning("Errore aggiornamento NBT shulker: " + e.getMessage());
+            plugin.getLogger().warning("Error updating shulker NBT: " + e.getMessage());
         }
     }
 
-    public int importLegacyData(Map<String, ItemStack[]> legacyData) {
-        int imported = 0;
-
-        for (Map.Entry<String, ItemStack[]> entry : legacyData.entrySet()) {
-            String newId = entry.getKey();
-            ItemStack[] contents = entry.getValue();
-            shulkerData.put(newId, cloneContents(contents));
-            imported++;
-        }
-
-        if (imported > 0) {
-            saveData();
-        }
-
-        plugin.getLogger().info("Importati " + imported + " inventari da dati legacy");
-        return imported;
-    }
-
-    private String getOrCreateShulkerId(ItemStack shulkerBox) {
+    public String getOrCreateShulkerId(ItemStack shulkerBox) {
         ItemMeta meta = shulkerBox.getItemMeta();
         if (meta == null) {
             meta = Bukkit.getItemFactory().getItemMeta(shulkerBox.getType());
@@ -315,7 +524,7 @@ public final class VirtualShulkerManager {
         return newId;
     }
 
-    private boolean isShulkerBox(ItemStack item) {
+    public boolean isShulkerBox(ItemStack item) {
         if (item == null) return false;
         Material type = item.getType();
         return type == Material.SHULKER_BOX ||
@@ -337,6 +546,26 @@ public final class VirtualShulkerManager {
                 type == Material.BLACK_SHULKER_BOX;
     }
 
+    public boolean isShulkerBox(Material material) {
+        return material == Material.SHULKER_BOX ||
+                material == Material.WHITE_SHULKER_BOX ||
+                material == Material.ORANGE_SHULKER_BOX ||
+                material == Material.MAGENTA_SHULKER_BOX ||
+                material == Material.LIGHT_BLUE_SHULKER_BOX ||
+                material == Material.YELLOW_SHULKER_BOX ||
+                material == Material.LIME_SHULKER_BOX ||
+                material == Material.PINK_SHULKER_BOX ||
+                material == Material.GRAY_SHULKER_BOX ||
+                material == Material.LIGHT_GRAY_SHULKER_BOX ||
+                material == Material.CYAN_SHULKER_BOX ||
+                material == Material.PURPLE_SHULKER_BOX ||
+                material == Material.BLUE_SHULKER_BOX ||
+                material == Material.BROWN_SHULKER_BOX ||
+                material == Material.GREEN_SHULKER_BOX ||
+                material == Material.RED_SHULKER_BOX ||
+                material == Material.BLACK_SHULKER_BOX;
+    }
+
     private Inventory createInventory(ItemStack[] contents) {
         Component title = Config.getShulkerTitle();
         Inventory inventory = Bukkit.createInventory(null, Config.getShulkerSize(), title);
@@ -346,16 +575,6 @@ public final class VirtualShulkerManager {
         }
 
         return inventory;
-    }
-
-    private ItemStack[] loadInventory(String shulkerId) {
-        ItemStack[] original = shulkerData.get(shulkerId);
-        return original != null ? cloneContents(original) : null;
-    }
-
-    private void saveInventory(String shulkerId, Inventory inventory) {
-        ItemStack[] contents = inventory.getContents();
-        shulkerData.put(shulkerId, cloneContents(contents));
     }
 
     private ItemStack[] cloneContents(ItemStack[] contents) {
@@ -372,62 +591,51 @@ public final class VirtualShulkerManager {
         return cloned;
     }
 
-    private void saveDataAsync() {
-        Bukkit.getScheduler().runTaskAsynchronously(plugin, this::saveData);
-    }
-
-    public void saveData() {
-        try {
-            if (!dataFile.getParentFile().exists()) {
-                dataFile.getParentFile().mkdirs();
+    public void shutdown() {
+        for (Map.Entry<UUID, ShulkerSession> entry : new HashMap<>(activeSessions).entrySet()) {
+            Player player = Bukkit.getPlayer(entry.getKey());
+            if (player != null) {
+                closeShulker(player, true, true);
             }
-
-            try (FileOutputStream fos = new FileOutputStream(dataFile);
-                 BukkitObjectOutputStream oos = new BukkitObjectOutputStream(fos)) {
-
-                oos.writeInt(shulkerData.size());
-
-                for (Map.Entry<String, ItemStack[]> entry : shulkerData.entrySet()) {
-                    oos.writeUTF(entry.getKey());
-                    oos.writeObject(entry.getValue());
-                }
-            }
-
-            plugin.getLogger().info("Saved " + shulkerData.size() + " shulker inventories");
-        } catch (IOException e) {
-            plugin.getLogger().severe("Failed to save shulker data: " + e.getMessage());
-            e.printStackTrace(System.err);
-        }
-    }
-
-    private void loadData() {
-        if (!dataFile.exists()) {
-            plugin.getLogger().info("No shulker data file found, starting fresh");
-            return;
         }
 
-        try (FileInputStream fis = new FileInputStream(dataFile); BukkitObjectInputStream ois = new BukkitObjectInputStream(fis)) {
-
-            int size = ois.readInt();
-
-            for (int i = 0; i < size; i++) {
-                String shulkerId = ois.readUTF();
-                ItemStack[] contents = (ItemStack[]) ois.readObject();
-                shulkerData.put(shulkerId, contents);
+        for (Map.Entry<UUID, Map<String, ItemStack[]>> entry : playerCache.entrySet()) {
+            for (Map.Entry<String, ItemStack[]> shulker : entry.getValue().entrySet()) {
+                database.saveShulkerSync(shulker.getKey(), shulker.getValue());
             }
-
-            plugin.getLogger().info("Loaded " + shulkerData.size() + " shulker inventories");
-        } catch (IOException | ClassNotFoundException e) {
-            plugin.getLogger().severe("Failed to load shulker data: " + e.getMessage());
-            e.printStackTrace(System.err);
         }
-    }
 
-    public void clearData() {
-        shulkerData.clear();
+        shulkerLocks.clear();
+        lockedShulkerIds.clear();
+        placedShulkerLocations.clear();
+        playerCache.clear();
+        playerShulkerIds.clear();
         activeSessions.clear();
-        playerLocks.clear();
+        loadingPlayers.clear();
         openedShulkerItems.clear();
+
+        database.close();
+    }
+
+    public void clearCache() {
+        shulkerLocks.clear();
+        lockedShulkerIds.clear();
+        playerCache.clear();
+        playerShulkerIds.clear();
+        activeSessions.clear();
+        loadingPlayers.clear();
+        openedShulkerItems.clear();
+    }
+
+    public void reloadCache() {
+        clearCache();
+        for (Player player : Bukkit.getOnlinePlayers()) {
+            loadPlayerCache(player);
+        }
+    }
+
+    public DatabaseManager getDatabase() {
+        return database;
     }
 
     private record ShulkerSession(Inventory inventory, String shulkerId, long openedAt) {}

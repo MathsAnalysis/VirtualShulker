@@ -2,6 +2,7 @@ package com.github.mathsanalysis.vshulker.listener;
 
 import com.github.mathsanalysis.vshulker.config.Config;
 import com.github.mathsanalysis.vshulker.manager.VirtualShulkerManager;
+import org.bukkit.GameMode;
 import org.bukkit.Material;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
@@ -9,14 +10,14 @@ import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.block.Action;
 import org.bukkit.event.entity.EntityDamageEvent;
+import org.bukkit.event.entity.EntityPickupItemEvent;
 import org.bukkit.event.entity.PlayerDeathEvent;
-import org.bukkit.event.inventory.InventoryClickEvent;
-import org.bukkit.event.inventory.InventoryCloseEvent;
-import org.bukkit.event.inventory.InventoryDragEvent;
-import org.bukkit.event.inventory.InventoryMoveItemEvent;
+import org.bukkit.event.inventory.*;
 import org.bukkit.event.player.PlayerDropItemEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
+import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
+import org.bukkit.event.player.PlayerSwapHandItemsEvent;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemStack;
 
@@ -58,11 +59,9 @@ public record ShulkerListener(VirtualShulkerManager manager) implements Listener
         }
 
         ItemStack itemInHand = player.getInventory().getItemInMainHand();
-        boolean isMainHand = true;
 
         if (!isShulkerBox(itemInHand)) {
             itemInHand = player.getInventory().getItemInOffHand();
-            isMainHand = false;
             if (!isShulkerBox(itemInHand)) {
                 return;
             }
@@ -73,6 +72,15 @@ public record ShulkerListener(VirtualShulkerManager manager) implements Listener
         }
 
         event.setCancelled(true);
+
+        if (manager.isLoading(player) || manager.hasOpenShulker(player)) {
+            return;
+        }
+
+        String shulkerId = manager.getShulkerIdFromItem(itemInHand);
+        if (shulkerId != null && manager.isShulkerInUse(shulkerId)) {
+            return;
+        }
 
         manager.openShulker(player, itemInHand);
     }
@@ -126,9 +134,30 @@ public record ShulkerListener(VirtualShulkerManager manager) implements Listener
         }
 
         if (event.getClick().isKeyboardClick()) {
-            ItemStack hotbarItem = player.getInventory().getItem(event.getHotbarButton());
-            if (isShulkerBox(hotbarItem) || isShulkerBox(clicked)) {
+            int hotbar = event.getHotbarButton();
+            if (hotbar >= 0) {
+                ItemStack hotbarItem = player.getInventory().getItem(hotbar);
+                if (isShulkerBox(hotbarItem) || isShulkerBox(clicked)) {
+                    event.setCancelled(true);
+                    return;
+                }
+            }
+        }
+
+        String openShulkerId = manager.getOpenShulkerId(player);
+        if (openShulkerId != null && clickedInv != null && !clickedInv.equals(topInv)) {
+            String clickedId = manager.getShulkerIdFromItem(clicked);
+            if (openShulkerId.equals(clickedId)) {
                 event.setCancelled(true);
+                return;
+            }
+        }
+
+        if (event.getClick() == ClickType.CREATIVE && isShulkerBox(clicked)) {
+            String clickedId = manager.getShulkerIdFromItem(clicked);
+            if (clickedId != null) {
+                event.setCancelled(true);
+                return;
             }
         }
     }
@@ -189,8 +218,68 @@ public record ShulkerListener(VirtualShulkerManager manager) implements Listener
         }
 
         ItemStack droppedItem = event.getItemDrop().getItemStack();
+
         if (isShulkerBox(droppedItem)) {
             event.setCancelled(true);
+            return;
+        }
+
+        String openId = manager.getOpenShulkerId(player);
+        String droppedId = manager.getShulkerIdFromItem(droppedItem);
+        if (openId != null && openId.equals(droppedId)) {
+            event.setCancelled(true);
+        }
+    }
+
+    @EventHandler(priority = EventPriority.LOWEST)
+    public void onPlayerSwapHand(PlayerSwapHandItemsEvent event) {
+        Player player = event.getPlayer();
+
+        if (!manager.hasOpenShulker(player)) {
+            return;
+        }
+
+        if (isShulkerBox(event.getMainHandItem()) || isShulkerBox(event.getOffHandItem())) {
+            event.setCancelled(true);
+        }
+    }
+
+    @EventHandler(priority = EventPriority.LOWEST)
+    public void onEntityPickupItem(EntityPickupItemEvent event) {
+        if (!(event.getEntity() instanceof Player player)) {
+            return;
+        }
+
+        if (!manager.hasOpenShulker(player)) {
+            return;
+        }
+
+        ItemStack item = event.getItem().getItemStack();
+        if (isShulkerBox(item)) {
+            String openId = manager.getOpenShulkerId(player);
+            String pickupId = manager.getShulkerIdFromItem(item);
+            if (openId != null && openId.equals(pickupId)) {
+                event.setCancelled(true);
+            }
+        }
+    }
+
+    @EventHandler(priority = EventPriority.LOWEST)
+    public void onCreativeInventory(InventoryCreativeEvent event) {
+        if (!(event.getWhoClicked() instanceof Player player)) {
+            return;
+        }
+
+        if (player.getGameMode() != GameMode.CREATIVE) {
+            return;
+        }
+
+        ItemStack item = event.getCursor();
+        if (isShulkerBox(item)) {
+            String id = manager.getShulkerIdFromItem(item);
+            if (id != null && manager.isShulkerInUse(id)) {
+                event.setCancelled(true);
+            }
         }
     }
 
@@ -212,12 +301,21 @@ public record ShulkerListener(VirtualShulkerManager manager) implements Listener
     }
 
     @EventHandler(priority = EventPriority.LOWEST)
+    public void onPlayerJoin(PlayerJoinEvent event) {
+        manager.loadPlayerCache(event.getPlayer());
+    }
+
+    @EventHandler(priority = EventPriority.LOWEST)
     public void onPlayerQuit(PlayerQuitEvent event) {
         Player player = event.getPlayer();
 
         if (manager.hasOpenShulker(player)) {
             manager.closeShulker(player, true, true);
+        } else if (manager.isLoading(player)) {
+            manager.cancelLoading(player);
         }
+
+        manager.unloadPlayerCache(player);
     }
 
     @EventHandler(priority = EventPriority.LOWEST)
@@ -226,6 +324,8 @@ public record ShulkerListener(VirtualShulkerManager manager) implements Listener
 
         if (manager.hasOpenShulker(player)) {
             manager.closeShulker(player, true, true);
+        } else if (manager.isLoading(player)) {
+            manager.cancelLoading(player);
         }
     }
 
