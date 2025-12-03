@@ -1,43 +1,43 @@
 # VirtualShulker
 
-VirtualShulker è un progetto Java che offre funzionalità innovative relative agli shulker box virtuali, pensato per essere utilizzato nell’ambito di plugin Minecraft o ambienti che consentono la gestione avanzata di contenuti virtuali.
+VirtualShulker is a Java-based project providing innovative features for virtual shulker boxes, designed for integration into Minecraft plugins or any environment requiring advanced virtual inventory management.
 
-## Caratteristiche principali
+## Main Features
 
-- **Gestione Shulker Box virtuali:** creazione, apertura e manipolazione di shulker box direttamente dal mondo virtuale, senza la necessità di oggetti fisici in gioco.
-- **Interfaccia intuitiva:** progettata per essere facilmente integrabile e utilizzabile con interazioni semplici.
-- **Personalizzazione avanzata:** possibilità di configurare comportamenti e accessi ai contenuti virtuali.
-- **Supporto completo Java:** progettato e implementato interamente in Java per massima compatibilità con ciascun server Minecraft.
+- **Virtual Shulker Box management:** create, open, and manipulate shulker boxes directly in the virtual world, without needing physical items in-game.
+- **Intuitive interface:** easy to integrate and use via simple interactions.
+- **Advanced customization:** configure behaviors and permissions for virtual contents.
+- **Fully Java compatible:** developed entirely in Java for maximum compatibility with Minecraft servers.
 
-## Installazione
+## Installation
 
-> **Nota:** per utilizzare VirtualShulker è necessario avere un ambiente Java configurato e (eventualmente) un server Minecraft compatibile con Bukkit/Spigot/Paper.
+> **Note:** To use VirtualShulker, you need a working Java environment and (optionally) a compatible Minecraft server (Bukkit/Spigot/Paper).
 
-1. Clonare il repository:
+1. Clone the repository:
    ```bash
    git clone https://github.com/MathsAnalysis/VirtualShulker.git
    ```
-2. Compilare il progetto con Maven o Gradle.
-3. Copiare il file `.jar` generato nella cartella dei plugin del server Minecraft.
-4. Riavviare il server per attivare VirtualShulker.
+2. Build the project using Maven or Gradle.
+3. Place the generated `.jar` file in your Minecraft server's plugins folder.
+4. Restart the server to enable VirtualShulker.
 
-## Uso
+## Usage
 
-Dopo l'installazione, VirtualShulker permette ai giocatori di accedere ad una shulker box virtuale tramite comandi specifici del plugin o interfacce grafiche custom. La configurazione e la documentazione dei comandi sono disponibili nel file [wiki](./wiki) (se presente) o direttamente nel codice sorgente.
+After setup, VirtualShulker allows players to access a virtual shulker box via specific plugin commands or custom graphical interfaces. Configuration and documentation for commands can be found in the [wiki](./wiki) (if available) or directly in the source code.
 
-## Contribuisci
+## Contributing
 
-1. Fai un fork di questo repository.
-2. Crea un branch dal main per la tua feature/bugfix.
-3. Invia una pull request dettagliata descrivendo la modifica.
-4. Ogni contributo è benvenuto!
+1. Fork this repository.
+2. Create a branch from `main` for your feature/bugfix.
+3. Submit a detailed pull request describing your changes.
+4. All contributions are welcome!
 
-## Licenza
+## License
 
-Questo progetto è distribuito sotto licenza MIT. Consulta il file `LICENSE` per i dettagli.
+This project is licensed under the MIT License. See the `LICENSE` file for details.
 
 ---
 
-**Autore:** [MathsAnalysis](https://github.com/MathsAnalysis)
+**Author:** [MathsAnalysis](https://github.com/MathsAnalysis)
 
-Se hai domande o suggerimenti, apri una issue su GitHub!
+If you have questions or suggestions, feel free to open a GitHub issue!
