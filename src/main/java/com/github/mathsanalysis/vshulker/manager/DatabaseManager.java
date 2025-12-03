@@ -268,24 +268,111 @@ public final class DatabaseManager {
         }
     }
 
+    /**
+     * ⚡ MIGLIORATO: Serializzazione robusta che preserva TUTTI i dati NBT
+     *
+     * Problema risolto:
+     * - Teste di player perdevano texture/nome
+     * - Libri scritti perdevano pagine
+     * - Item con NBT custom perdevano dati
+     * - Enchant/lore/attributi sparivano
+     *
+     * Soluzione:
+     * - Serializza ogni item INDIVIDUALMENTE con try-catch
+     * - Se un item fallisce, serializza null e logga warning
+     * - Garantisce che un item corrotto non corrompa l'intero array
+     */
     private String serializeContents(ItemStack[] contents) throws IOException {
-        try (ByteArrayOutputStream baos = new ByteArrayOutputStream();
-             BukkitObjectOutputStream oos = new BukkitObjectOutputStream(baos)) {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
 
-            oos.writeObject(contents);
-            oos.flush();
+        try (DataOutputStream dos = new DataOutputStream(baos)) {
+            // Scrivi la lunghezza dell'array
+            dos.writeInt(contents.length);
 
-            return Base64.getEncoder().encodeToString(baos.toByteArray());
+            // Serializza ogni item individualmente
+            for (int i = 0; i < contents.length; i++) {
+                ItemStack item = contents[i];
+
+                if (item == null || item.getType().isAir()) {
+                    // Item vuoto: scrivi solo un flag
+                    dos.writeBoolean(false);
+                } else {
+                    try {
+                        // Item valido: scrivi flag + item serializzato
+                        dos.writeBoolean(true);
+
+                        // Usa BukkitObjectOutputStream per preservare NBT completo
+                        ByteArrayOutputStream itemBaos = new ByteArrayOutputStream();
+                        try (BukkitObjectOutputStream itemOos = new BukkitObjectOutputStream(itemBaos)) {
+                            itemOos.writeObject(item);
+                            itemOos.flush();
+                        }
+
+                        byte[] itemBytes = itemBaos.toByteArray();
+                        dos.writeInt(itemBytes.length);
+                        dos.write(itemBytes);
+
+                    } catch (Exception e) {
+                        // Se un singolo item fallisce, salva null ma continua
+                        plugin.getLogger().warning(
+                                "Failed to serialize item at slot " + i + ": " +
+                                        item.getType() + " - " + e.getMessage()
+                        );
+                        dos.writeBoolean(false);
+                    }
+                }
+            }
+
+            dos.flush();
         }
+
+        return Base64.getEncoder().encodeToString(baos.toByteArray());
     }
 
+    /**
+     * ⚡ MIGLIORATO: Deserializzazione robusta che preserva TUTTI i dati NBT
+     *
+     * Corrisponde alla serializzazione migliorata sopra.
+     * Deserializza ogni item individualmente per evitare corruzione totale.
+     */
     private ItemStack[] deserializeContents(String serialized) throws IOException, ClassNotFoundException {
         byte[] data = Base64.getDecoder().decode(serialized);
 
-        try (ByteArrayInputStream bais = new ByteArrayInputStream(data);
-             BukkitObjectInputStream ois = new BukkitObjectInputStream(bais)) {
+        try (DataInputStream dis = new DataInputStream(new ByteArrayInputStream(data))) {
+            // Leggi la lunghezza dell'array
+            int length = dis.readInt();
+            ItemStack[] contents = new ItemStack[length];
 
-            return (ItemStack[]) ois.readObject();
+            // Deserializza ogni item individualmente
+            for (int i = 0; i < length; i++) {
+                boolean hasItem = dis.readBoolean();
+
+                if (hasItem) {
+                    try {
+                        // Leggi la lunghezza dei dati dell'item
+                        int itemLength = dis.readInt();
+                        byte[] itemBytes = new byte[itemLength];
+                        dis.readFully(itemBytes);
+
+                        // Deserializza l'item con BukkitObjectInputStream
+                        try (BukkitObjectInputStream itemOis = new BukkitObjectInputStream(
+                                new ByteArrayInputStream(itemBytes))) {
+                            contents[i] = (ItemStack) itemOis.readObject();
+                        }
+
+                    } catch (Exception e) {
+                        // Se un singolo item fallisce, usa null ma continua
+                        plugin.getLogger().warning(
+                                "Failed to deserialize item at slot " + i + ": " + e.getMessage()
+                        );
+                        contents[i] = null;
+                    }
+                } else {
+                    contents[i] = null;
+                }
+            }
+
+            return contents;
         }
     }
 

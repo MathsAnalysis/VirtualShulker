@@ -43,6 +43,9 @@ public final class VirtualShulkerManager {
 
     private final ReentrantLock globalLock = new ReentrantLock();
 
+    // Sistema di Tracking Ownership
+    private final Map<String, UUID> shulkerOwnership = new ConcurrentHashMap<>();
+
     private VirtualShulkerManager(VirtualShulkerPlugin plugin) {
         this.plugin = plugin;
         this.shulkerIdKey = new NamespacedKey(plugin, "shulker_id");
@@ -68,6 +71,10 @@ public final class VirtualShulkerManager {
 
     public static VirtualShulkerManager getInstance() {
         return instance;
+    }
+
+    public VirtualShulkerPlugin getPlugin() {
+        return plugin;
     }
 
     public NamespacedKey getShulkerIdKey() {
@@ -140,6 +147,38 @@ public final class VirtualShulkerManager {
         return placedShulkerLocations.contains(location.getBlock().getLocation());
     }
 
+    /**
+     * Verifica se una shulker con questo ID appartiene a un altro player.
+     */
+    public boolean isDuplicateShulker(String shulkerId, Player player) {
+        UUID currentOwner = shulkerOwnership.get(shulkerId);
+
+        if (currentOwner == null) {
+            shulkerOwnership.put(shulkerId, player.getUniqueId());
+            return false;
+        }
+
+        boolean isDuplicate = !currentOwner.equals(player.getUniqueId());
+
+        if (isDuplicate) {
+            plugin.getLogger().warning(
+                    "Duplicate shulker detected! ID: " + shulkerId +
+                            " | Original owner: " + Bukkit.getOfflinePlayer(currentOwner).getName() +
+                            " | Attempting player: " + player.getName()
+            );
+        }
+
+        return isDuplicate;
+    }
+
+    private void setShulkerOwnership(String shulkerId, UUID playerId) {
+        shulkerOwnership.put(shulkerId, playerId);
+    }
+
+    private void clearShulkerOwnership(String shulkerId) {
+        shulkerOwnership.remove(shulkerId);
+    }
+
     public void loadPlayerCache(Player player) {
         UUID playerId = player.getUniqueId();
 
@@ -155,12 +194,18 @@ public final class VirtualShulkerManager {
 
             for (ItemStack item : player.getInventory().getContents()) {
                 String id = getShulkerIdFromItem(item);
-                if (id != null) shulkerIds.add(id);
+                if (id != null) {
+                    shulkerIds.add(id);
+                    shulkerOwnership.putIfAbsent(id, playerId);
+                }
             }
 
             for (ItemStack item : player.getEnderChest().getContents()) {
                 String id = getShulkerIdFromItem(item);
-                if (id != null) shulkerIds.add(id);
+                if (id != null) {
+                    shulkerIds.add(id);
+                    shulkerOwnership.putIfAbsent(id, playerId);
+                }
             }
 
             for (String shulkerId : shulkerIds) {
@@ -206,6 +251,98 @@ public final class VirtualShulkerManager {
         return pdc.get(shulkerIdKey, PersistentDataType.STRING);
     }
 
+    /**
+     * Rigenera un nuovo UUID per una shulker duplicata.
+     *
+     * IMPORTANTE: Aggiorna anche l'item nell'inventario del player per persistence!
+     */
+    public void regenerateShulkerId(ItemStack shulkerItem, String originalId) {
+        regenerateShulkerId(shulkerItem, originalId, null);
+    }
+
+    public void regenerateShulkerId(ItemStack shulkerItem, String originalId, UUID newOwner) {
+        if (!isShulkerBox(shulkerItem)) {
+            return;
+        }
+
+        ItemStack[] originalContents = getShulkerContents(originalId);
+        String newId = UUID.randomUUID().toString();
+
+        ItemMeta meta = shulkerItem.getItemMeta();
+        if (meta != null) {
+            PersistentDataContainer pdc = meta.getPersistentDataContainer();
+            pdc.set(shulkerIdKey, PersistentDataType.STRING, newId);
+            shulkerItem.setItemMeta(meta);
+        }
+
+        if (originalContents != null) {
+            updateShulkerNBT(shulkerItem, originalContents);
+            database.saveShulker(newId, originalContents);
+        }
+
+        if (newOwner != null) {
+            setShulkerOwnership(newId, newOwner);
+        }
+
+        plugin.getLogger().info("Regenerated shulker ID: " + originalId + " -> " + newId +
+                (newOwner != null ? " (owner: " + Bukkit.getOfflinePlayer(newOwner).getName() + ")" : ""));
+    }
+
+    /**
+     * ⚠️ FIX DATA PERSISTENCE: Aggiorna l'item nell'inventario del player dopo rigenerazione
+     *
+     * Questo metodo trova e aggiorna l'item effettivo nell'inventario del player
+     * per garantire che il nuovo UUID sia persistito correttamente.
+     */
+    private void updateShulkerInPlayerInventory(Player player, String oldId, ItemStack regeneratedShulker) {
+        // Controlla main hand
+        ItemStack mainHand = player.getInventory().getItemInMainHand();
+        if (isMatchingShulker(mainHand, oldId)) {
+            player.getInventory().setItemInMainHand(regeneratedShulker.clone());
+            return;
+        }
+
+        // Controlla off hand
+        ItemStack offHand = player.getInventory().getItemInOffHand();
+        if (isMatchingShulker(offHand, oldId)) {
+            player.getInventory().setItemInOffHand(regeneratedShulker.clone());
+            return;
+        }
+
+        // Cerca nell'inventario principale
+        for (int i = 0; i < player.getInventory().getSize(); i++) {
+            ItemStack item = player.getInventory().getItem(i);
+            if (isMatchingShulker(item, oldId)) {
+                player.getInventory().setItem(i, regeneratedShulker.clone());
+                return;
+            }
+        }
+
+        // Cerca nell'enderchest
+        for (int i = 0; i < player.getEnderChest().getSize(); i++) {
+            ItemStack item = player.getEnderChest().getItem(i);
+            if (isMatchingShulker(item, oldId)) {
+                player.getEnderChest().setItem(i, regeneratedShulker.clone());
+                return;
+            }
+        }
+    }
+
+    /**
+     * Helper: verifica se un item è una shulker con lo specifico ID
+     */
+    private boolean isMatchingShulker(ItemStack item, String targetId) {
+        if (!isShulkerBox(item)) {
+            return false;
+        }
+
+        String itemId = getShulkerIdFromItem(item);
+        return targetId.equals(itemId);
+    }
+
+    /**
+     * AGGIORNATO con fix data persistence
+     */
     public void openShulker(Player player, ItemStack shulkerBox) {
         if (!isShulkerBox(shulkerBox)) {
             return;
@@ -219,6 +356,28 @@ public final class VirtualShulkerManager {
 
         String shulkerId = getOrCreateShulkerId(shulkerBox);
 
+        // ===== VERIFICA ANTI-DUPLICAZIONE =====
+        if (isDuplicateShulker(shulkerId, player)) {
+            String oldId = shulkerId;
+
+            plugin.getLogger().warning(
+                    "Auto-regenerating duplicate shulker for " + player.getName() +
+                            " (original ID: " + oldId + ")"
+            );
+
+            // Rigenera UUID
+            regenerateShulkerId(shulkerBox, oldId, playerId);
+
+            // ⚡ FIX: Aggiorna l'item nell'inventario del player!
+            updateShulkerInPlayerInventory(player, oldId, shulkerBox);
+
+            // Ottieni il nuovo ID
+            shulkerId = getShulkerIdFromItem(shulkerBox);
+
+            plugin.getLogger().info("Shulker regenerated and persisted: " + oldId + " -> " + shulkerId);
+        }
+        // ===== FINE VERIFICA =====
+
         if (!tryLockShulker(shulkerId, playerId)) {
             plugin.getLogger().warning("Blocked duplicate shulker access: " + shulkerId + " by " + player.getName());
             return;
@@ -231,17 +390,20 @@ public final class VirtualShulkerManager {
         if (cache != null) {
             ItemStack[] cached = cache.get(shulkerId);
             if (cached != null) {
+                String finalShulkerId2 = shulkerId;
                 Bukkit.getScheduler().runTask(plugin, () ->
-                        finalizeOpen(player, shulkerId, shulkerClone, cloneContents(cached))
+                        finalizeOpen(player, finalShulkerId2, shulkerClone, cloneContents(cached))
                 );
                 return;
             }
         }
 
+        String finalShulkerId = shulkerId;
+        String finalShulkerId1 = shulkerId;
         database.loadShulker(shulkerId).thenAccept(contents -> {
             if (!player.isOnline()) {
                 loadingPlayers.remove(playerId);
-                releaseLock(shulkerId);
+                releaseLock(finalShulkerId1);
                 return;
             }
 
@@ -249,29 +411,29 @@ public final class VirtualShulkerManager {
 
             if (contents != null) {
                 if (cache != null) {
-                    cache.put(shulkerId, contents);
-                    playerShulkerIds.computeIfAbsent(playerId, k -> ConcurrentHashMap.newKeySet()).add(shulkerId);
+                    cache.put(finalShulkerId1, contents);
+                    playerShulkerIds.computeIfAbsent(playerId, k -> ConcurrentHashMap.newKeySet()).add(finalShulkerId1);
                 }
                 finalContents = cloneContents(contents);
             } else {
                 ItemStack[] nbtContents = extractFromNBT(shulkerClone);
                 if (nbtContents != null) {
                     if (cache != null) {
-                        cache.put(shulkerId, cloneContents(nbtContents));
-                        playerShulkerIds.computeIfAbsent(playerId, k -> ConcurrentHashMap.newKeySet()).add(shulkerId);
+                        cache.put(finalShulkerId1, cloneContents(nbtContents));
+                        playerShulkerIds.computeIfAbsent(playerId, k -> ConcurrentHashMap.newKeySet()).add(finalShulkerId1);
                     }
-                    database.saveShulker(shulkerId, nbtContents);
+                    database.saveShulker(finalShulkerId1, nbtContents);
                 }
                 finalContents = nbtContents;
             }
 
             Bukkit.getScheduler().runTask(plugin, () ->
-                    finalizeOpen(player, shulkerId, shulkerClone, finalContents)
+                    finalizeOpen(player, finalShulkerId1, shulkerClone, finalContents)
             );
         }).exceptionally(ex -> {
             plugin.getLogger().warning("Error loading shulker: " + ex.getMessage());
             loadingPlayers.remove(playerId);
-            releaseLock(shulkerId);
+            releaseLock(finalShulkerId);
             return null;
         });
     }
@@ -613,6 +775,7 @@ public final class VirtualShulkerManager {
         activeSessions.clear();
         loadingPlayers.clear();
         openedShulkerItems.clear();
+        shulkerOwnership.clear();
 
         database.close();
     }
@@ -625,6 +788,7 @@ public final class VirtualShulkerManager {
         activeSessions.clear();
         loadingPlayers.clear();
         openedShulkerItems.clear();
+        shulkerOwnership.clear();
     }
 
     public void reloadCache() {

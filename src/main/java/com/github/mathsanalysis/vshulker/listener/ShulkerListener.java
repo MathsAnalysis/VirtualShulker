@@ -264,6 +264,25 @@ public record ShulkerListener(VirtualShulkerManager manager) implements Listener
         }
     }
 
+    /**
+     * PROTEZIONE ANTI-DUPLICAZIONE CREATIVA
+     *
+     * Questo evento previene l'exploit di duplicazione delle shulker in modalità creativa.
+     *
+     * Problema originale:
+     * 1. Player A ha una shulker con UUID "abc-123"
+     * 2. Player B duplica quella shulker in creativa (stesso UUID "abc-123")
+     * 3. Player B modifica il contenuto della sua shulker
+     * 4. Anche la shulker di Player A viene modificata (stesso shulker_id!)
+     *
+     * Soluzione:
+     * - Quando un player in creativa duplica/prende una shulker che ha già un UUID
+     * - Genera automaticamente un NUOVO UUID univoco
+     * - Copia il contenuto dal database della shulker originale
+     * - Questo garantisce che ogni shulker duplicata sia indipendente
+     *
+     * Nota: Se la shulker è attualmente in uso, la duplicazione viene bloccata completamente
+     */
     @EventHandler(priority = EventPriority.LOWEST)
     public void onCreativeInventory(InventoryCreativeEvent event) {
         if (!(event.getWhoClicked() instanceof Player player)) {
@@ -276,9 +295,28 @@ public record ShulkerListener(VirtualShulkerManager manager) implements Listener
 
         ItemStack item = event.getCursor();
         if (isShulkerBox(item)) {
-            String id = manager.getShulkerIdFromItem(item);
-            if (id != null && manager.isShulkerInUse(id)) {
-                event.setCancelled(true);
+            String originalId = manager.getShulkerIdFromItem(item);
+            if (originalId != null) {
+                // Se la shulker è in uso, blocca completamente la duplicazione
+                if (manager.isShulkerInUse(originalId)) {
+                    event.setCancelled(true);
+                    manager.getPlugin().getLogger().warning(
+                            "Blocked creative duplication of in-use shulker: " + originalId +
+                                    " by " + player.getName()
+                    );
+                    return;
+                }
+
+                // Genera sempre un nuovo UUID per le shulker duplicate in creativa
+                // per prevenire modifiche cross-player
+                ItemStack newItem = item.clone();
+                manager.regenerateShulkerId(newItem, originalId);
+                event.setCursor(newItem);
+
+                manager.getPlugin().getLogger().info(
+                        "Regenerated shulker ID for creative duplication by " + player.getName() +
+                                ": " + originalId + " -> " + manager.getShulkerIdFromItem(newItem)
+                );
             }
         }
     }
