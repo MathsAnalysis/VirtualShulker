@@ -66,8 +66,10 @@ public record ShulkerListener(VirtualShulkerManager manager) implements Listener
                 return;
             }
         }
-
-        if (!player.hasPermission(Config.PERMISSION_USE)) {
+        
+        if (Config.PERMISSION_USE != null && !Config.PERMISSION_USE.isEmpty()
+                && !player.hasPermission(Config.PERMISSION_USE)) {
+            player.sendMessage(Config.getMessageNoPermission());
             return;
         }
 
@@ -157,7 +159,6 @@ public record ShulkerListener(VirtualShulkerManager manager) implements Listener
             String clickedId = manager.getShulkerIdFromItem(clicked);
             if (clickedId != null) {
                 event.setCancelled(true);
-                return;
             }
         }
     }
@@ -188,23 +189,21 @@ public record ShulkerListener(VirtualShulkerManager manager) implements Listener
         Inventory source = event.getSource();
         Inventory destination = event.getDestination();
 
-        for (Player player : source.getViewers().stream()
-                .filter(viewer -> viewer instanceof Player)
-                .map(viewer -> (Player) viewer)
-                .toList()) {
-            if (manager.hasOpenShulker(player) && !manager.isValidSession(player, source)) {
-                event.setCancelled(true);
-                return;
+        for (Object viewer : source.getViewers()) {
+            if (viewer instanceof Player player) {
+                if (manager.hasOpenShulker(player) && !manager.isValidSession(player, source)) {
+                    event.setCancelled(true);
+                    return;
+                }
             }
         }
 
-        for (Player player : destination.getViewers().stream()
-                .filter(viewer -> viewer instanceof Player)
-                .map(viewer -> (Player) viewer)
-                .toList()) {
-            if (manager.hasOpenShulker(player) && !manager.isValidSession(player, destination)) {
-                event.setCancelled(true);
-                return;
+        for (Object viewer : destination.getViewers()) {
+            if (viewer instanceof Player player) {
+                if (manager.hasOpenShulker(player) && !manager.isValidSession(player, destination)) {
+                    event.setCancelled(true);
+                    return;
+                }
             }
         }
     }
@@ -264,25 +263,6 @@ public record ShulkerListener(VirtualShulkerManager manager) implements Listener
         }
     }
 
-    /**
-     * PROTEZIONE ANTI-DUPLICAZIONE CREATIVA
-     *
-     * Questo evento previene l'exploit di duplicazione delle shulker in modalità creativa.
-     *
-     * Problema originale:
-     * 1. Player A ha una shulker con UUID "abc-123"
-     * 2. Player B duplica quella shulker in creativa (stesso UUID "abc-123")
-     * 3. Player B modifica il contenuto della sua shulker
-     * 4. Anche la shulker di Player A viene modificata (stesso shulker_id!)
-     *
-     * Soluzione:
-     * - Quando un player in creativa duplica/prende una shulker che ha già un UUID
-     * - Genera automaticamente un NUOVO UUID univoco
-     * - Copia il contenuto dal database della shulker originale
-     * - Questo garantisce che ogni shulker duplicata sia indipendente
-     *
-     * Nota: Se la shulker è attualmente in uso, la duplicazione viene bloccata completamente
-     */
     @EventHandler(priority = EventPriority.LOWEST)
     public void onCreativeInventory(InventoryCreativeEvent event) {
         if (!(event.getWhoClicked() instanceof Player player)) {
@@ -297,7 +277,6 @@ public record ShulkerListener(VirtualShulkerManager manager) implements Listener
         if (isShulkerBox(item)) {
             String originalId = manager.getShulkerIdFromItem(item);
             if (originalId != null) {
-                // Se la shulker è in uso, blocca completamente la duplicazione
                 if (manager.isShulkerInUse(originalId)) {
                     event.setCancelled(true);
                     manager.getPlugin().getLogger().warning(
@@ -307,10 +286,8 @@ public record ShulkerListener(VirtualShulkerManager manager) implements Listener
                     return;
                 }
 
-                // Genera sempre un nuovo UUID per le shulker duplicate in creativa
-                // per prevenire modifiche cross-player
                 ItemStack newItem = item.clone();
-                manager.regenerateShulkerId(newItem, originalId);
+                manager.regenerateShulkerId(newItem, originalId, player.getUniqueId());
                 event.setCursor(newItem);
 
                 manager.getPlugin().getLogger().info(

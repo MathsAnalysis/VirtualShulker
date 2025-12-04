@@ -43,10 +43,17 @@ public final class Config {
         messageNoPermission = config.getString("messages.no-permission", "<red>Non hai il permesso per usare questo comando!");
         messageReload = config.getString("messages.reload", "<green>Plugin ricaricato con successo!");
 
-        PERMISSION_USE = config.getString("permissions.use", "virtualshulker.use");
-        PERMISSION_ADMIN = config.getString("permissions.admin", "virtualshulker.admin");
+        PERMISSION_USE = config.getString("shulker.use", "");
+        PERMISSION_ADMIN = config.getString("shulker.admin", "virtualshulker.admin");
 
-        plugin.getLogger().info("Config caricato: size=" + shulkerSize + ", permissions.use=" + PERMISSION_USE);
+        if (PERMISSION_USE != null && (PERMISSION_USE.equals("*") || PERMISSION_USE.trim().isEmpty())) {
+            PERMISSION_USE = null;
+            plugin.getLogger().info("Virtual shulker access: EVERYONE (no permission required)");
+        } else {
+            plugin.getLogger().info("Virtual shulker access: Permission required (" + PERMISSION_USE + ")");
+        }
+
+        plugin.getLogger().info("Config caricato: size=" + shulkerSize);
     }
 
     private static void createDefaultConfig(java.io.File configFile) {
@@ -70,9 +77,14 @@ public final class Config {
 
             writer.write("# Permissions plugin\n");
             writer.write("permissions:\n");
-            writer.write("  # Permesso per usare la shulker (shift + right-click)\n");
-            writer.write("  use: \"virtualshulker.use\"\n");
-            writer.write("  # Permesso per comandi admin\n");
+            writer.write("  # Permesso per usare la shulker virtuale (shift + right-click)\n");
+            writer.write("  # Lascia vuoto (\"\") o usa \"*\" per permettere a tutti\n");
+            writer.write("  # Esempi:\n");
+            writer.write("  #   use: \"\"                        # Tutti possono usare\n");
+            writer.write("  #   use: \"*\"                       # Tutti possono usare\n");
+            writer.write("  #   use: \"virtualshulker.use\"      # Solo con permesso\n");
+            writer.write("  use: \"\"\n");
+            writer.write("  # Permesso per comandi admin (sempre richiesto)\n");
             writer.write("  admin: \"virtualshulker.admin\"\n");
 
             writer.close();
