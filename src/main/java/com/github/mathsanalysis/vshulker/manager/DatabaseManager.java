@@ -29,14 +29,31 @@ public final class DatabaseManager {
             )
             """;
 
+    private static final String CREATE_BACKUP_TABLE = """
+            CREATE TABLE IF NOT EXISTS shulker_backups (
+                backup_id TEXT PRIMARY KEY,
+                original_id TEXT NOT NULL,
+                contents TEXT NOT NULL,
+                created_at INTEGER DEFAULT (strftime('%s', 'now'))
+            )
+            """;
+
     private static final String INSERT_OR_REPLACE = """
             INSERT OR REPLACE INTO shulkers (shulker_id, contents, updated_at)
             VALUES (?, ?, strftime('%s', 'now'))
             """;
 
+    private static final String INSERT_BACKUP = """
+            INSERT INTO shulker_backups (backup_id, original_id, contents, created_at)
+            VALUES (?, ?, ?, strftime('%s', 'now'))
+            """;
+
     private static final String SELECT_BY_ID = "SELECT contents FROM shulkers WHERE shulker_id = ?";
     private static final String SELECT_ALL = "SELECT shulker_id, contents FROM shulkers";
     private static final String DELETE_BY_ID = "DELETE FROM shulkers WHERE shulker_id = ?";
+    private static final String CLEANUP_OLD_BACKUPS = "DELETE FROM shulker_backups WHERE created_at < ?";
+
+    private static final long BACKUP_RETENTION_SECONDS = 7 * 24 * 60 * 60;
 
     public DatabaseManager(VirtualShulkerPlugin plugin) {
         this.plugin = plugin;
@@ -56,13 +73,19 @@ public final class DatabaseManager {
                 try (Statement stmt = connection.createStatement()) {
                     stmt.execute("PRAGMA journal_mode=WAL");
                     stmt.execute("PRAGMA synchronous=NORMAL");
+                    stmt.execute("PRAGMA foreign_keys=ON");
+
                     stmt.execute(CREATE_TABLE);
+                    stmt.execute(CREATE_BACKUP_TABLE);
                 }
 
                 plugin.getLogger().info("SQLite database initialized: " + databaseFile.getName());
 
+                cleanupOldBackups();
+
             } catch (SQLException e) {
                 plugin.getLogger().log(Level.SEVERE, "Database initialization error", e);
+                throw new RuntimeException("Failed to initialize database", e);
             }
         }, executor);
     }
@@ -71,13 +94,22 @@ public final class DatabaseManager {
         return CompletableFuture.runAsync(() -> saveShulkerInternal(shulkerId, contents), executor);
     }
 
-    public CompletableFuture<Void> saveShulkerSync(String shulkerId, ItemStack[] contents) {
+    public void saveShulkerSync(String shulkerId, ItemStack[] contents) {
         saveShulkerInternal(shulkerId, contents);
-        return CompletableFuture.completedFuture(null);
     }
 
     private void saveShulkerInternal(String shulkerId, ItemStack[] contents) {
         try {
+            ItemStack[] existing = loadShulkerInternal(shulkerId);
+            if (existing != null && existing.length > 0) {
+                try {
+                    String backupId = shulkerId + "_backup_" + System.currentTimeMillis();
+                    saveBackup(backupId, shulkerId, existing);
+                } catch (Exception e) {
+                    plugin.getLogger().warning("Failed to create backup for shulker " + shulkerId + ": " + e.getMessage());
+                }
+            }
+
             String serialized = serializeContents(contents);
 
             try (PreparedStatement pstmt = connection.prepareStatement(INSERT_OR_REPLACE)) {
@@ -87,8 +119,22 @@ public final class DatabaseManager {
             }
 
         } catch (SQLException | IOException e) {
-            plugin.getLogger().log(Level.WARNING, "Error saving shulker: " + shulkerId, e);
+            plugin.getLogger().log(Level.SEVERE, "CRITICAL: Error saving shulker " + shulkerId, e);
+            throw new RuntimeException("Failed to save shulker", e);
         }
+    }
+
+    private void saveBackup(String backupId, String originalId, ItemStack[] contents) throws SQLException, IOException {
+        String serialized = serializeContents(contents);
+
+        try (PreparedStatement pstmt = connection.prepareStatement(INSERT_BACKUP)) {
+            pstmt.setString(1, backupId);
+            pstmt.setString(2, originalId);
+            pstmt.setString(3, serialized);
+            pstmt.executeUpdate();
+        }
+
+        plugin.getLogger().fine("Created backup " + backupId + " for shulker " + originalId);
     }
 
     public CompletableFuture<Void> saveAllShulkers(Map<String, ItemStack[]> shulkerData) {
@@ -97,11 +143,17 @@ public final class DatabaseManager {
                 connection.setAutoCommit(false);
 
                 try (PreparedStatement pstmt = connection.prepareStatement(INSERT_OR_REPLACE)) {
+                    int count = 0;
                     for (Map.Entry<String, ItemStack[]> entry : shulkerData.entrySet()) {
                         String serialized = serializeContents(entry.getValue());
                         pstmt.setString(1, entry.getKey());
                         pstmt.setString(2, serialized);
                         pstmt.addBatch();
+                        count++;
+
+                        if (count % 100 == 0) {
+                            pstmt.executeBatch();
+                        }
                     }
                     pstmt.executeBatch();
                 }
@@ -109,7 +161,7 @@ public final class DatabaseManager {
                 connection.commit();
                 connection.setAutoCommit(true);
 
-                plugin.getLogger().info("Saved " + shulkerData.size() + " shulkers to database");
+                plugin.getLogger().info("Batch saved " + shulkerData.size() + " shulkers to database");
 
             } catch (SQLException | IOException e) {
                 try {
@@ -119,6 +171,7 @@ public final class DatabaseManager {
                     plugin.getLogger().log(Level.SEVERE, "Rollback error", ex);
                 }
                 plugin.getLogger().log(Level.SEVERE, "Batch save error", e);
+                throw new RuntimeException("Failed to batch save shulkers", e);
             }
         }, executor);
     }
@@ -155,6 +208,9 @@ public final class DatabaseManager {
             try (Statement stmt = connection.createStatement();
                  ResultSet rs = stmt.executeQuery(SELECT_ALL)) {
 
+                int successCount = 0;
+                int failCount = 0;
+
                 while (rs.next()) {
                     String shulkerId = rs.getString("shulker_id");
                     String serialized = rs.getString("contents");
@@ -162,12 +218,15 @@ public final class DatabaseManager {
                     try {
                         ItemStack[] contents = deserializeContents(serialized);
                         result.put(shulkerId, contents);
+                        successCount++;
                     } catch (IOException | ClassNotFoundException e) {
-                        plugin.getLogger().log(Level.WARNING, "Deserialization error: " + shulkerId, e);
+                        plugin.getLogger().log(Level.WARNING, "Deserialization error for shulker: " + shulkerId, e);
+                        failCount++;
                     }
                 }
 
-                plugin.getLogger().info("Loaded " + result.size() + " shulkers from database");
+                plugin.getLogger().info("Loaded " + successCount + " shulkers from database" +
+                        (failCount > 0 ? " (" + failCount + " failed)" : ""));
 
             } catch (SQLException e) {
                 plugin.getLogger().log(Level.SEVERE, "Error loading shulkers", e);
@@ -181,7 +240,10 @@ public final class DatabaseManager {
         return CompletableFuture.runAsync(() -> {
             try (PreparedStatement pstmt = connection.prepareStatement(DELETE_BY_ID)) {
                 pstmt.setString(1, shulkerId);
-                pstmt.executeUpdate();
+                int deleted = pstmt.executeUpdate();
+                if (deleted > 0) {
+                    plugin.getLogger().fine("Deleted shulker: " + shulkerId);
+                }
             } catch (SQLException e) {
                 plugin.getLogger().log(Level.WARNING, "Error deleting shulker: " + shulkerId, e);
             }
@@ -257,6 +319,23 @@ public final class DatabaseManager {
         }, executor);
     }
 
+    private void cleanupOldBackups() {
+        CompletableFuture.runAsync(() -> {
+            long cutoffTime = System.currentTimeMillis() / 1000 - BACKUP_RETENTION_SECONDS;
+
+            try (PreparedStatement pstmt = connection.prepareStatement(CLEANUP_OLD_BACKUPS)) {
+                pstmt.setLong(1, cutoffTime);
+                int deleted = pstmt.executeUpdate();
+
+                if (deleted > 0) {
+                    plugin.getLogger().info("Cleaned up " + deleted + " old backup entries");
+                }
+            } catch (SQLException e) {
+                plugin.getLogger().warning("Failed to cleanup old backups: " + e.getMessage());
+            }
+        }, executor);
+    }
+
     public void close() {
         if (connection != null) {
             try {
@@ -296,7 +375,7 @@ public final class DatabaseManager {
                     } catch (Exception e) {
                         plugin.getLogger().warning(
                                 "Failed to serialize item at slot " + i + ": " +
-                                        item.getType() + " - " + e.getMessage()
+                                        item.getType() + " (amount: " + item.getAmount() + ") - " + e.getMessage()
                         );
                         dos.writeBoolean(false);
                     }
@@ -316,6 +395,9 @@ public final class DatabaseManager {
             int length = dis.readInt();
             ItemStack[] contents = new ItemStack[length];
 
+            int successCount = 0;
+            int failCount = 0;
+
             for (int i = 0; i < length; i++) {
                 boolean hasItem = dis.readBoolean();
 
@@ -327,17 +409,27 @@ public final class DatabaseManager {
 
                         try (BukkitObjectInputStream itemOis = new BukkitObjectInputStream(new ByteArrayInputStream(itemBytes))) {
                             contents[i] = (ItemStack) itemOis.readObject();
-                        }catch (ClassNotFoundException e) {
-                            plugin.getLogger().warning("Failed to deserialize item at slot " + i + ": " + e.getMessage());
+                            successCount++;
+                        } catch (ClassNotFoundException e) {
+                            plugin.getLogger().warning("Failed to deserialize item at slot " + i +
+                                    " (class not found): " + e.getMessage());
+                            contents[i] = null;
+                            failCount++;
                         }
 
                     } catch (Exception e) {
                         plugin.getLogger().warning("Failed to deserialize item at slot " + i + ": " + e.getMessage());
                         contents[i] = null;
+                        failCount++;
                     }
                 } else {
                     contents[i] = null;
                 }
+            }
+
+            if (failCount > 0) {
+                plugin.getLogger().warning("Deserialization completed with " + successCount +
+                        " successful items and " + failCount + " failed items");
             }
 
             return contents;
