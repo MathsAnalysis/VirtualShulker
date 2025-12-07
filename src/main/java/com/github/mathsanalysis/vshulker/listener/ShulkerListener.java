@@ -66,7 +66,7 @@ public record ShulkerListener(VirtualShulkerManager manager) implements Listener
                 return;
             }
         }
-        
+
         if (Config.PERMISSION_USE != null && !Config.PERMISSION_USE.isEmpty()
                 && !player.hasPermission(Config.PERMISSION_USE)) {
             player.sendMessage(Config.getMessageNoPermission());
@@ -188,6 +188,16 @@ public record ShulkerListener(VirtualShulkerManager manager) implements Listener
     public void onInventoryMoveItem(InventoryMoveItemEvent event) {
         Inventory source = event.getSource();
         Inventory destination = event.getDestination();
+
+        ItemStack movedItem = event.getItem();
+        if (isShulkerBox(movedItem)) {
+            String movedId = manager.getShulkerIdFromItem(movedItem);
+            if (movedId != null && manager.isShulkerInUse(movedId)) {
+                event.setCancelled(true);
+                manager.getPlugin().getLogger().warning("Blocked automatic movement of in-use shulker: " + movedId);
+                return;
+            }
+        }
 
         for (Object viewer : source.getViewers()) {
             if (viewer instanceof Player player) {
@@ -317,7 +327,11 @@ public record ShulkerListener(VirtualShulkerManager manager) implements Listener
 
     @EventHandler(priority = EventPriority.LOWEST)
     public void onPlayerJoin(PlayerJoinEvent event) {
-        manager.loadPlayerCache(event.getPlayer());
+        Player player = event.getPlayer();
+
+        manager.migrateLazyPlayer(player);
+
+        manager.loadPlayerOwnership(player);
     }
 
     @EventHandler(priority = EventPriority.LOWEST)
@@ -330,7 +344,7 @@ public record ShulkerListener(VirtualShulkerManager manager) implements Listener
             manager.cancelLoading(player);
         }
 
-        manager.unloadPlayerCache(player);
+        manager.unloadPlayerOwnership(player);
     }
 
     @EventHandler(priority = EventPriority.LOWEST)
