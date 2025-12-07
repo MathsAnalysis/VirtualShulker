@@ -38,6 +38,15 @@ public final class DatabaseManager {
             )
             """;
 
+    private static final String CREATE_CORRUPTED_TABLE = """
+            CREATE TABLE IF NOT EXISTS corrupted_shulkers (
+                shulker_id TEXT PRIMARY KEY,
+                corrupted_data TEXT NOT NULL,
+                error_message TEXT,
+                detected_at INTEGER DEFAULT (strftime('%s', 'now'))
+            )
+            """;
+
     private static final String INSERT_OR_REPLACE = """
             INSERT OR REPLACE INTO shulkers (shulker_id, contents, updated_at)
             VALUES (?, ?, strftime('%s', 'now'))
@@ -48,12 +57,18 @@ public final class DatabaseManager {
             VALUES (?, ?, ?, strftime('%s', 'now'))
             """;
 
+    private static final String INSERT_CORRUPTED = """
+            INSERT OR REPLACE INTO corrupted_shulkers (shulker_id, corrupted_data, error_message, detected_at)
+            VALUES (?, ?, ?, strftime('%s', 'now'))
+            """;
+
     private static final String SELECT_BY_ID = "SELECT contents FROM shulkers WHERE shulker_id = ?";
     private static final String SELECT_ALL = "SELECT shulker_id, contents FROM shulkers";
     private static final String DELETE_BY_ID = "DELETE FROM shulkers WHERE shulker_id = ?";
     private static final String CLEANUP_OLD_BACKUPS = "DELETE FROM shulker_backups WHERE created_at < ?";
 
     private static final long BACKUP_RETENTION_SECONDS = 7 * 24 * 60 * 60;
+    private static final int MAX_SHULKER_SIZE = 54;
 
     public DatabaseManager(VirtualShulkerPlugin plugin) {
         this.plugin = plugin;
@@ -77,6 +92,7 @@ public final class DatabaseManager {
 
                     stmt.execute(CREATE_TABLE);
                     stmt.execute(CREATE_BACKUP_TABLE);
+                    stmt.execute(CREATE_CORRUPTED_TABLE);
                 }
 
                 plugin.getLogger().info("SQLite database initialized: " + databaseFile.getName());
@@ -137,6 +153,19 @@ public final class DatabaseManager {
         plugin.getLogger().fine("Created backup " + backupId + " for shulker " + originalId);
     }
 
+    private void saveCorruptedData(String shulkerId, String corruptedData, String errorMessage) {
+        try (PreparedStatement pstmt = connection.prepareStatement(INSERT_CORRUPTED)) {
+            pstmt.setString(1, shulkerId);
+            pstmt.setString(2, corruptedData);
+            pstmt.setString(3, errorMessage);
+            pstmt.executeUpdate();
+
+            plugin.getLogger().warning("Saved corrupted data for shulker " + shulkerId + " to corrupted_shulkers table");
+        } catch (SQLException e) {
+            plugin.getLogger().log(Level.SEVERE, "Failed to save corrupted data reference", e);
+        }
+    }
+
     public CompletableFuture<Void> saveAllShulkers(Map<String, ItemStack[]> shulkerData) {
         return CompletableFuture.runAsync(() -> {
             try {
@@ -191,11 +220,27 @@ public final class DatabaseManager {
             try (ResultSet rs = pstmt.executeQuery()) {
                 if (rs.next()) {
                     String serialized = rs.getString("contents");
-                    return deserializeContents(serialized);
+                    try {
+                        return deserializeContents(serialized);
+                    } catch (IOException | ClassNotFoundException e) {
+                        plugin.getLogger().log(Level.SEVERE,
+                                "CORRUPTED DATA for shulker " + shulkerId + ": " + e.getMessage(), e);
+
+                        saveCorruptedData(shulkerId, serialized, e.getMessage());
+
+                        deleteShulkerSync(shulkerId);
+
+                        plugin.getLogger().warning(
+                                "Corrupted shulker " + shulkerId + " has been moved to corrupted_shulkers table and removed from active shulkers. " +
+                                        "Player will receive an empty shulker. Check corrupted_shulkers table to attempt manual recovery."
+                        );
+
+                        return null;
+                    }
                 }
             }
 
-        } catch (SQLException | IOException | ClassNotFoundException e) {
+        } catch (SQLException e) {
             plugin.getLogger().log(Level.WARNING, "Error loading shulker: " + shulkerId, e);
         }
         return null;
@@ -221,12 +266,16 @@ public final class DatabaseManager {
                         successCount++;
                     } catch (IOException | ClassNotFoundException e) {
                         plugin.getLogger().log(Level.WARNING, "Deserialization error for shulker: " + shulkerId, e);
+
+                        saveCorruptedData(shulkerId, serialized, e.getMessage());
+                        deleteShulkerSync(shulkerId);
+
                         failCount++;
                     }
                 }
 
                 plugin.getLogger().info("Loaded " + successCount + " shulkers from database" +
-                        (failCount > 0 ? " (" + failCount + " failed)" : ""));
+                        (failCount > 0 ? " (" + failCount + " corrupted entries moved to corrupted_shulkers)" : ""));
 
             } catch (SQLException e) {
                 plugin.getLogger().log(Level.SEVERE, "Error loading shulkers", e);
@@ -237,17 +286,19 @@ public final class DatabaseManager {
     }
 
     public CompletableFuture<Void> deleteShulker(String shulkerId) {
-        return CompletableFuture.runAsync(() -> {
-            try (PreparedStatement pstmt = connection.prepareStatement(DELETE_BY_ID)) {
-                pstmt.setString(1, shulkerId);
-                int deleted = pstmt.executeUpdate();
-                if (deleted > 0) {
-                    plugin.getLogger().fine("Deleted shulker: " + shulkerId);
-                }
-            } catch (SQLException e) {
-                plugin.getLogger().log(Level.WARNING, "Error deleting shulker: " + shulkerId, e);
+        return CompletableFuture.runAsync(() -> deleteShulkerSync(shulkerId), executor);
+    }
+
+    private void deleteShulkerSync(String shulkerId) {
+        try (PreparedStatement pstmt = connection.prepareStatement(DELETE_BY_ID)) {
+            pstmt.setString(1, shulkerId);
+            int deleted = pstmt.executeUpdate();
+            if (deleted > 0) {
+                plugin.getLogger().fine("Deleted shulker: " + shulkerId);
             }
-        }, executor);
+        } catch (SQLException e) {
+            plugin.getLogger().log(Level.WARNING, "Error deleting shulker: " + shulkerId, e);
+        }
     }
 
     public CompletableFuture<Integer> migrateFromDatFile() {
@@ -389,10 +440,44 @@ public final class DatabaseManager {
     }
 
     private ItemStack[] deserializeContents(String serialized) throws IOException, ClassNotFoundException {
-        byte[] data = Base64.getDecoder().decode(serialized);
+        if (serialized == null || serialized.isEmpty()) {
+            throw new IOException("Serialized data is null or empty");
+        }
+
+        byte[] data;
+        try {
+            data = Base64.getDecoder().decode(serialized);
+        } catch (IllegalArgumentException e) {
+            plugin.getLogger().severe("Base64 decode failed - data is corrupted");
+            throw new IOException("Invalid Base64 data", e);
+        }
+
+        if (data.length < 4) {
+            plugin.getLogger().severe("Data too short: " + data.length + " bytes (need at least 4 for length)");
+            throw new IOException("Data too short to contain valid array length");
+        }
 
         try (DataInputStream dis = new DataInputStream(new ByteArrayInputStream(data))) {
             int length = dis.readInt();
+
+            if (length < 0) {
+                plugin.getLogger().severe("CORRUPTED DATA - negative array length: " + length);
+                plugin.getLogger().severe("Data preview (first 32 bytes hex): " + bytesToHex(data, Math.min(32, data.length)));
+                plugin.getLogger().severe("Data length: " + data.length + " bytes, Base64 length: " + serialized.length());
+                throw new IOException("Corrupted data: negative array length " + length);
+            }
+
+            if (length > MAX_SHULKER_SIZE) {
+                plugin.getLogger().severe("CORRUPTED DATA - unreasonably large array: " + length + " (max: " + MAX_SHULKER_SIZE + ")");
+                plugin.getLogger().severe("Data preview (first 32 bytes hex): " + bytesToHex(data, Math.min(32, data.length)));
+                throw new IOException("Corrupted data: array length " + length + " exceeds maximum " + MAX_SHULKER_SIZE);
+            }
+
+            if (length == 0) {
+                plugin.getLogger().fine("Empty shulker (length=0)");
+                return new ItemStack[0];
+            }
+
             ItemStack[] contents = new ItemStack[length];
 
             int successCount = 0;
@@ -404,6 +489,21 @@ public final class DatabaseManager {
                 if (hasItem) {
                     try {
                         int itemLength = dis.readInt();
+
+                        if (itemLength < 0) {
+                            plugin.getLogger().warning("Corrupted item at slot " + i + ": negative length " + itemLength);
+                            contents[i] = null;
+                            failCount++;
+                            continue;
+                        }
+
+                        if (itemLength > 1024 * 1024) {
+                            plugin.getLogger().warning("Corrupted item at slot " + i + ": unreasonably large " + itemLength + " bytes");
+                            contents[i] = null;
+                            failCount++;
+                            continue;
+                        }
+
                         byte[] itemBytes = new byte[itemLength];
                         dis.readFully(itemBytes);
 
@@ -417,6 +517,10 @@ public final class DatabaseManager {
                             failCount++;
                         }
 
+                    } catch (EOFException e) {
+                        plugin.getLogger().warning("Unexpected end of data at slot " + i + ": " + e.getMessage());
+                        contents[i] = null;
+                        failCount++;
                     } catch (Exception e) {
                         plugin.getLogger().warning("Failed to deserialize item at slot " + i + ": " + e.getMessage());
                         contents[i] = null;
@@ -429,11 +533,29 @@ public final class DatabaseManager {
 
             if (failCount > 0) {
                 plugin.getLogger().warning("Deserialization completed with " + successCount +
-                        " successful items and " + failCount + " failed items");
+                        " successful items and " + failCount + " failed/null items");
             }
 
             return contents;
         }
+    }
+
+    private String bytesToHex(byte[] bytes, int maxLength) {
+        if (bytes == null) return "null";
+
+        int length = Math.min(bytes.length, maxLength);
+        StringBuilder sb = new StringBuilder(length * 3);
+
+        for (int i = 0; i < length; i++) {
+            if (i > 0) sb.append(' ');
+            sb.append(String.format("%02X", bytes[i]));
+        }
+
+        if (bytes.length > maxLength) {
+            sb.append(" ... (").append(bytes.length - maxLength).append(" more bytes)");
+        }
+
+        return sb.toString();
     }
 
     public boolean isConnected() {
