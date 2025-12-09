@@ -4,7 +4,7 @@ plugins {
 }
 
 group = 'com.github.mathsanalysis.vshulker'
-version = '1.0.2'
+version = '1.0.6'
 
 java {
     toolchain.languageVersion.set(JavaLanguageVersion.of(21))
