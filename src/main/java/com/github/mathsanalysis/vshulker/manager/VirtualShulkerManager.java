@@ -16,7 +16,10 @@ import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.block.ShulkerBox;
 import org.bukkit.persistence.PersistentDataContainer;
 import org.bukkit.persistence.PersistentDataType;
+import org.bukkit.util.io.BukkitObjectInputStream;
+import org.bukkit.util.io.BukkitObjectOutputStream;
 
+import java.io.*;
 import java.util.*;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -41,7 +44,24 @@ public final class VirtualShulkerManager {
 
     private final Set<Location> placedShulkerLocations;
 
+    // ✨ IMPROVED: Sistema di fallback con timestamp
+    private final Map<String, PendingSaveEntry> pendingSavesWithTimestamp;
+    private final File pendingSavesFile;
+
     private static final long LOADING_TIMEOUT_MS = 5000;
+
+    // Record per salvare insieme ai contenuti anche il timestamp e lo stato NBT
+    private static class PendingSaveEntry {
+        final ItemStack[] contents;
+        final long timestamp;
+        final boolean nbtWasUpdated;
+
+        PendingSaveEntry(ItemStack[] contents, long timestamp, boolean nbtWasUpdated) {
+            this.contents = contents;
+            this.timestamp = timestamp;
+            this.nbtWasUpdated = nbtWasUpdated;
+        }
+    }
 
     private VirtualShulkerManager(VirtualShulkerPlugin plugin) {
         this.plugin = plugin;
@@ -53,6 +73,9 @@ public final class VirtualShulkerManager {
         this.loadingPlayers = ConcurrentHashMap.newKeySet();
         this.loadingTimestamps = new ConcurrentHashMap<>();
         this.placedShulkerLocations = ConcurrentHashMap.newKeySet();
+
+        this.pendingSavesWithTimestamp = new ConcurrentHashMap<>();
+        this.pendingSavesFile = new File(plugin.getDataFolder(), "pending_saves.dat");
     }
 
     public static VirtualShulkerManager getInstance(VirtualShulkerPlugin plugin) {
@@ -76,6 +99,8 @@ public final class VirtualShulkerManager {
 
     public CompletableFuture<Void> initialize() {
         return CompletableFuture.runAsync(() -> {
+            loadPendingShulkerData();
+
             MigrationManager migrationManager = new MigrationManager(plugin, this);
             int migrated = migrationManager.migrateFromDatabase();
 
@@ -89,6 +114,113 @@ public final class VirtualShulkerManager {
 
             plugin.getLogger().info("VirtualShulkerManager initialized (NBT-only mode)");
         }, plugin.getVirtualThreadExecutor());
+    }
+
+    private void loadPendingShulkerData() {
+        if (!pendingSavesFile.exists()) {
+            plugin.getLogger().info("No pending saves file found");
+            return;
+        }
+
+        try (FileInputStream fis = new FileInputStream(pendingSavesFile);
+             BukkitObjectInputStream ois = new BukkitObjectInputStream(fis)) {
+
+            int count = ois.readInt();
+
+            for (int i = 0; i < count; i++) {
+                String shulkerId = ois.readUTF();
+                long timestamp = ois.readLong();
+                boolean nbtWasUpdated = ois.readBoolean();
+                ItemStack[] contents = (ItemStack[]) ois.readObject();
+
+                PendingSaveEntry entry = new PendingSaveEntry(contents, timestamp, nbtWasUpdated);
+                pendingSavesWithTimestamp.put(shulkerId, entry);
+            }
+
+            // Filtra le entries troppo vecchie (più di 7 giorni)
+            long cutoff = System.currentTimeMillis() - (7 * 24 * 60 * 60 * 1000);
+            int validCount = 0;
+            int expiredCount = 0;
+
+            Set<String> toRemove = new HashSet<>();
+            for (Map.Entry<String, PendingSaveEntry> entry : pendingSavesWithTimestamp.entrySet()) {
+                if (entry.getValue().timestamp > cutoff) {
+                    validCount++;
+                } else {
+                    toRemove.add(entry.getKey());
+                    expiredCount++;
+                }
+            }
+
+            toRemove.forEach(pendingSavesWithTimestamp::remove);
+
+            if (validCount > 0) {
+                plugin.getLogger().warning("====================================");
+                plugin.getLogger().warning("Loaded " + validCount + " PENDING SAVES from previous session!");
+                plugin.getLogger().warning("These shulkers will use saved contents instead of NBT");
+                plugin.getLogger().warning("Contents will be restored when players open these shulkers");
+                if (expiredCount > 0) {
+                    plugin.getLogger().warning("Discarded " + expiredCount + " expired pending saves (>7 days old)");
+                }
+                plugin.getLogger().warning("====================================");
+            }
+
+        } catch (Exception e) {
+            plugin.getLogger().severe("Failed to load pending saves: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+
+    private void savePendingShulkerData() {
+        if (pendingSavesWithTimestamp.isEmpty()) {
+            if (pendingSavesFile.exists()) {
+                pendingSavesFile.delete();
+            }
+            return;
+        }
+
+        try {
+            if (!plugin.getDataFolder().exists()) {
+                plugin.getDataFolder().mkdirs();
+            }
+
+            try (FileOutputStream fos = new FileOutputStream(pendingSavesFile);
+                 BukkitObjectOutputStream oos = new BukkitObjectOutputStream(fos)) {
+
+                oos.writeInt(pendingSavesWithTimestamp.size());
+
+                for (Map.Entry<String, PendingSaveEntry> entry : pendingSavesWithTimestamp.entrySet()) {
+                    oos.writeUTF(entry.getKey());
+                    oos.writeLong(entry.getValue().timestamp);
+                    oos.writeBoolean(entry.getValue().nbtWasUpdated);
+                    oos.writeObject(entry.getValue().contents);
+                }
+
+                oos.flush();
+                plugin.getLogger().fine("Saved " + pendingSavesWithTimestamp.size() + " pending shulker saves to file");
+            }
+
+        } catch (Exception e) {
+            plugin.getLogger().severe("CRITICAL: Failed to save pending shulker data: " + e.getMessage());
+            e.printStackTrace();
+        }
+    }
+
+    private boolean hasPendingSave(String shulkerId) {
+        return pendingSavesWithTimestamp.containsKey(shulkerId);
+    }
+
+    private ItemStack[] getPendingSave(String shulkerId) {
+        PendingSaveEntry entry = pendingSavesWithTimestamp.get(shulkerId);
+        return entry != null ? entry.contents : null;
+    }
+
+    private void clearPendingSave(String shulkerId) {
+        PendingSaveEntry removed = pendingSavesWithTimestamp.remove(shulkerId);
+        if (removed != null) {
+            plugin.getLogger().info("Cleared pending save for shulker: " + shulkerId);
+            savePendingShulkerData();
+        }
     }
 
     private boolean tryLockShulker(String shulkerId, UUID playerId) {
@@ -384,7 +516,30 @@ public final class VirtualShulkerManager {
         loadingPlayers.add(playerId);
         loadingTimestamps.put(playerId, System.currentTimeMillis());
 
-        ItemStack[] contents = getContentsFromNBT(shulkerBox);
+        // ✨ IMPROVED: Usa SEMPRE pending save se disponibile
+        ItemStack[] contents;
+        if (hasPendingSave(shulkerId)) {
+            PendingSaveEntry entry = pendingSavesWithTimestamp.get(shulkerId);
+
+            plugin.getLogger().warning("====================================");
+            plugin.getLogger().warning("RECOVERING PENDING SAVE for shulker: " + shulkerId);
+            plugin.getLogger().warning("Player: " + player.getName());
+            plugin.getLogger().warning("Pending save timestamp: " + new Date(entry.timestamp));
+            plugin.getLogger().warning("NBT was updated during save: " + entry.nbtWasUpdated);
+            plugin.getLogger().warning("Using pending save contents (ignoring NBT to prevent duplication)");
+            plugin.getLogger().warning("====================================");
+
+            contents = entry.contents;
+
+            // Aggiorna anche la NBT dell'item con i contenuti corretti
+            setContentsToNBT(shulkerBox, contents);
+            updateShulkerInPlayerInventory(player, shulkerId, shulkerBox);
+
+            // Rimuovi il pending save
+            clearPendingSave(shulkerId);
+        } else {
+            contents = getContentsFromNBT(shulkerBox);
+        }
 
         confirmLock(shulkerId, playerId);
 
@@ -423,33 +578,61 @@ public final class VirtualShulkerManager {
 
             updateShulkerNBTInPlayerInventory(player, session.shulkerId, contents);
 
-            plugin.getLogger().fine("Saved shulker " + session.shulkerId + " to NBT for " + player.getName());
+            plugin.getLogger().fine("Saved shulker " + session.shulkerId + " for " + player.getName());
         }
     }
 
+    // ✨ IMPROVED: SEMPRE salva in pending saves + aggiorna NBT se possibile
     private void updateShulkerNBTInPlayerInventory(Player player, String shulkerId, ItemStack[] contents) {
+        boolean nbtUpdated = false;
+
+        // Prova ad aggiornare la NBT dell'item se lo troviamo
         if (tryUpdateShulkerNBT(player.getInventory().getItemInMainHand(), shulkerId, contents)) {
-            return;
+            plugin.getLogger().fine("Updated shulker " + shulkerId + " in main hand");
+            nbtUpdated = true;
         }
 
-        if (tryUpdateShulkerNBT(player.getInventory().getItemInOffHand(), shulkerId, contents)) {
-            return;
+        if (!nbtUpdated && tryUpdateShulkerNBT(player.getInventory().getItemInOffHand(), shulkerId, contents)) {
+            plugin.getLogger().fine("Updated shulker " + shulkerId + " in off hand");
+            nbtUpdated = true;
         }
 
-        for (ItemStack item : player.getInventory().getContents()) {
-            if (tryUpdateShulkerNBT(item, shulkerId, contents)) {
-                return;
+        if (!nbtUpdated) {
+            for (ItemStack item : player.getInventory().getContents()) {
+                if (tryUpdateShulkerNBT(item, shulkerId, contents)) {
+                    plugin.getLogger().fine("Updated shulker " + shulkerId + " in inventory");
+                    nbtUpdated = true;
+                    break;
+                }
             }
         }
 
-        for (ItemStack item : player.getEnderChest().getContents()) {
-            if (tryUpdateShulkerNBT(item, shulkerId, contents)) {
-                return;
+        if (!nbtUpdated) {
+            for (ItemStack item : player.getEnderChest().getContents()) {
+                if (tryUpdateShulkerNBT(item, shulkerId, contents)) {
+                    plugin.getLogger().fine("Updated shulker " + shulkerId + " in ender chest");
+                    nbtUpdated = true;
+                    break;
+                }
             }
         }
 
-        plugin.getLogger().warning("Could not find shulker " + shulkerId +
-                " in " + player.getName() + "'s inventory to update NBT");
+        // ✨ CRITICO: SEMPRE salva in pending saves come backup di sicurezza
+        if (!nbtUpdated) {
+            plugin.getLogger().warning("====================================");
+            plugin.getLogger().warning("CRITICAL FALLBACK: Shulker item not found!");
+            plugin.getLogger().warning("Shulker ID: " + shulkerId);
+            plugin.getLogger().warning("Player: " + player.getName());
+            plugin.getLogger().warning("====================================");
+        }
+
+        // Salva SEMPRE in pending saves
+        PendingSaveEntry entry = new PendingSaveEntry(contents, System.currentTimeMillis(), nbtUpdated);
+        pendingSavesWithTimestamp.put(shulkerId, entry);
+        savePendingShulkerData();
+
+        plugin.getLogger().fine("Saved to pending saves: " + shulkerId +
+                " (NBT updated: " + nbtUpdated + ", total pending: " + pendingSavesWithTimestamp.size() + ")");
     }
 
     private boolean tryUpdateShulkerNBT(ItemStack item, String targetShulkerId, ItemStack[] contents) {
@@ -656,6 +839,11 @@ public final class VirtualShulkerManager {
             plugin.getLogger().info("Closed " + closedSessions + " active sessions");
         }
 
+        if (!pendingSavesWithTimestamp.isEmpty()) {
+            plugin.getLogger().warning("Saving " + pendingSavesWithTimestamp.size() + " pending shulker saves before shutdown");
+            savePendingShulkerData();
+        }
+
         shulkerLocks.clear();
         lockedShulkerIds.clear();
         placedShulkerLocations.clear();
@@ -694,6 +882,14 @@ public final class VirtualShulkerManager {
 
     public DatabaseManager getDatabase() {
         return null;
+    }
+
+    public Map<String, ItemStack[]> getPendingSaves() {
+        Map<String, ItemStack[]> result = new HashMap<>();
+        for (Map.Entry<String, PendingSaveEntry> entry : pendingSavesWithTimestamp.entrySet()) {
+            result.put(entry.getKey(), entry.getValue().contents);
+        }
+        return result;
     }
 
     private record ShulkerSession(Inventory inventory, String shulkerId, ItemStack originalShulker) {}

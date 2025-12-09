@@ -7,6 +7,7 @@ import net.kyori.adventure.text.format.NamedTextColor;
 import org.bukkit.Bukkit;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
+import org.bukkit.inventory.ItemStack;
 import revxrsal.commands.annotation.Command;
 import revxrsal.commands.annotation.Optional;
 import revxrsal.commands.annotation.Subcommand;
@@ -73,6 +74,56 @@ public record ShulkerCommand(VirtualShulkerPlugin plugin) {
         sender.sendMessage(Component.text("=== END DEBUG INFO ===", NamedTextColor.GOLD));
     }
 
+    @Subcommand("pending-saves")
+    @CommandPermission("virtualshulker.admin")
+    public void pendingSaves(CommandSender sender) {
+        var manager = plugin.getManager();
+        Map<String, ItemStack[]> pendingSaves = manager.getPendingSaves();
+
+        sender.sendMessage(Component.text("=== PENDING SAVES STATUS ===", NamedTextColor.GOLD));
+
+        if (pendingSaves.isEmpty()) {
+            sender.sendMessage(Component.text("✓ No pending saves (all good!)", NamedTextColor.GREEN));
+        } else {
+            sender.sendMessage(Component.text("⚠ Found " + pendingSaves.size() + " pending saves:", NamedTextColor.YELLOW));
+            sender.sendMessage(Component.text("These shulkers were modified but items weren't found in inventories", NamedTextColor.GRAY));
+            sender.sendMessage(Component.text("Contents are saved and will be restored when opened again", NamedTextColor.GRAY));
+            sender.sendMessage(Component.empty());
+
+            int displayed = 0;
+            for (Map.Entry<String, ItemStack[]> entry : pendingSaves.entrySet()) {
+                if (displayed >= 10) {
+                    int remaining = pendingSaves.size() - displayed;
+                    sender.sendMessage(Component.text("... and " + remaining + " more", NamedTextColor.GRAY));
+                    break;
+                }
+
+                String shulkerId = entry.getKey();
+                ItemStack[] contents = entry.getValue();
+                int itemCount = 0;
+                for (ItemStack item : contents) {
+                    if (item != null && !item.getType().isAir()) {
+                        itemCount++;
+                    }
+                }
+
+                sender.sendMessage(Component.text(
+                        "  • " + shulkerId.substring(0, 8) + "... (" + itemCount + " items)",
+                        NamedTextColor.YELLOW
+                ));
+                displayed++;
+            }
+
+            sender.sendMessage(Component.empty());
+            sender.sendMessage(Component.text("NOTE: If you see many pending saves, investigate:", NamedTextColor.RED));
+            sender.sendMessage(Component.text("  - Check server lag/TPS", NamedTextColor.GRAY));
+            sender.sendMessage(Component.text("  - Check for plugin conflicts (PlayerVaults, etc)", NamedTextColor.GRAY));
+            sender.sendMessage(Component.text("  - Check logs for errors", NamedTextColor.GRAY));
+        }
+
+        sender.sendMessage(Component.text("=== END PENDING SAVES ===", NamedTextColor.GOLD));
+    }
+
     @Subcommand("cleanup")
     @CommandPermission("virtualshulker.admin")
     public void cleanup(CommandSender sender, @Optional Player target) {
@@ -109,7 +160,15 @@ public record ShulkerCommand(VirtualShulkerPlugin plugin) {
         sender.sendMessage(Component.text("Players with active sessions: " + onlinePlayersWithCache, NamedTextColor.YELLOW));
         sender.sendMessage(Component.text("Active locks: " + manager.getActiveLocks().size(), NamedTextColor.YELLOW));
         sender.sendMessage(Component.text("Temporary locks: " + manager.getLockedIds().size(), NamedTextColor.YELLOW));
-        sender.sendMessage(Component.text("Database connected: " + database.isConnected(), NamedTextColor.YELLOW));
+
+        int pendingSavesCount = manager.getPendingSaves().size();
+        if (pendingSavesCount > 0) {
+            sender.sendMessage(Component.text("⚠ Pending saves: " + pendingSavesCount, NamedTextColor.RED));
+        } else {
+            sender.sendMessage(Component.text("✓ Pending saves: 0", NamedTextColor.GREEN));
+        }
+
+        sender.sendMessage(Component.text("Database connected: " + (database != null && database.isConnected()), NamedTextColor.YELLOW));
 
         sender.sendMessage(Component.text("=== END STATISTICS ===", NamedTextColor.GOLD));
     }
