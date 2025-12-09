@@ -6,13 +6,8 @@ import com.github.mathsanalysis.vshulker.listener.ShulkerBlockListener;
 import com.github.mathsanalysis.vshulker.listener.ShulkerListener;
 import com.github.mathsanalysis.vshulker.manager.VirtualShulkerManager;
 import com.github.mathsanalysis.vshulker.tasks.SessionCleanupTask;
-import com.github.mathsanalysis.vshulker.tasks.ShulkerPreviewUpdateTask;
 import org.bukkit.plugin.java.JavaPlugin;
 import revxrsal.commands.bukkit.BukkitCommandHandler;
-
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.TimeUnit;
 
 public final class VirtualShulkerPlugin extends JavaPlugin {
 
@@ -20,32 +15,26 @@ public final class VirtualShulkerPlugin extends JavaPlugin {
 
     private VirtualShulkerManager manager;
     private BukkitCommandHandler commandHandler;
-    private ExecutorService virtualThreadExecutor;
     private SessionCleanupTask cleanupTask;
-    private ShulkerPreviewUpdateTask previewTask;
 
     @Override
     public void onEnable() {
         instance = this;
 
-        this.virtualThreadExecutor = Executors.newVirtualThreadPerTaskExecutor();
-
         Config.load(this);
 
         this.manager = VirtualShulkerManager.getInstance(this);
+        manager.initialize();
 
+        registerListeners();
         registerCommands();
+        startTasks();
 
-        manager.initialize().thenRun(() -> getServer().getScheduler().runTask(this, () -> {
-            registerListeners();
-            startTasks();
-            getLogger().info("VirtualShulker enabled!");
-        })).exceptionally(throwable -> {
-                    getLogger().severe("Database initialization error: " + throwable.getMessage());
-                    throwable.printStackTrace(System.err);
-                    getServer().getPluginManager().disablePlugin(this);
-                    return null;
-        });
+        getLogger().info("========================================");
+        getLogger().info("VirtualShulker enabled!");
+        getLogger().info("Mode: NBT-only (no database, no IDs)");
+        getLogger().info("Contents stored directly in items");
+        getLogger().info("========================================");
     }
 
     @Override
@@ -54,28 +43,12 @@ public final class VirtualShulkerPlugin extends JavaPlugin {
             cleanupTask.cancel();
         }
 
-        if (previewTask != null) {
-            previewTask.cancel();
-        }
-
         if (commandHandler != null) {
             commandHandler.unregisterAllCommands();
         }
 
         if (manager != null) {
             manager.shutdown();
-        }
-
-        if (virtualThreadExecutor != null) {
-            virtualThreadExecutor.shutdown();
-            try {
-                if (!virtualThreadExecutor.awaitTermination(5, TimeUnit.SECONDS)) {
-                    virtualThreadExecutor.shutdownNow();
-                }
-            } catch (InterruptedException e) {
-                virtualThreadExecutor.shutdownNow();
-                Thread.currentThread().interrupt();
-            }
         }
 
         getLogger().info("VirtualShulker disabled");
@@ -90,10 +63,6 @@ public final class VirtualShulkerPlugin extends JavaPlugin {
 
     public static VirtualShulkerPlugin getInstance() {
         return instance;
-    }
-
-    public ExecutorService getVirtualThreadExecutor() {
-        return virtualThreadExecutor;
     }
 
     public VirtualShulkerManager getManager() {
@@ -120,8 +89,5 @@ public final class VirtualShulkerPlugin extends JavaPlugin {
     private void startTasks() {
         cleanupTask = new SessionCleanupTask(this, manager);
         cleanupTask.start();
-
-        previewTask = new ShulkerPreviewUpdateTask(this, manager);
-        previewTask.start();
     }
 }

@@ -5,7 +5,6 @@ import com.github.mathsanalysis.vshulker.manager.VirtualShulkerManager;
 import org.bukkit.GameMode;
 import org.bukkit.Location;
 import org.bukkit.Material;
-import org.bukkit.NamespacedKey;
 import org.bukkit.block.Block;
 import org.bukkit.block.ShulkerBox;
 import org.bukkit.entity.Player;
@@ -21,9 +20,6 @@ import org.bukkit.inventory.EquipmentSlot;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.BlockStateMeta;
-import org.bukkit.inventory.meta.ItemMeta;
-import org.bukkit.persistence.PersistentDataContainer;
-import org.bukkit.persistence.PersistentDataType;
 
 import java.util.Iterator;
 import java.util.Set;
@@ -52,12 +48,10 @@ public class ShulkerBlockListener implements Listener {
 
     private final VirtualShulkerPlugin plugin;
     private final VirtualShulkerManager manager;
-    private final NamespacedKey shulkerIdKey;
 
     public ShulkerBlockListener(VirtualShulkerPlugin plugin, VirtualShulkerManager manager) {
         this.plugin = plugin;
         this.manager = manager;
-        this.shulkerIdKey = new NamespacedKey(plugin, "shulker_id");
     }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
@@ -68,43 +62,8 @@ public class ShulkerBlockListener implements Listener {
             return;
         }
 
-        ItemMeta meta = item.getItemMeta();
-        if (meta == null) {
-            return;
-        }
-
-        PersistentDataContainer pdc = meta.getPersistentDataContainer();
-        String shulkerId = pdc.get(shulkerIdKey, PersistentDataType.STRING);
-
-        if (shulkerId == null) {
-            return;
-        }
-
-        if (manager.isShulkerInUse(shulkerId)) {
-            event.setCancelled(true);
-            plugin.getLogger().warning("Blocked placing shulker that is in use: " + shulkerId);
-            return;
-        }
-
         Location location = event.getBlock().getLocation();
-
-        plugin.getServer().getScheduler().runTask(plugin, () -> {
-            if (!(event.getBlock().getState() instanceof ShulkerBox shulkerBlock)) {
-                return;
-            }
-
-            PersistentDataContainer blockPdc = shulkerBlock.getPersistentDataContainer();
-            blockPdc.set(shulkerIdKey, PersistentDataType.STRING, shulkerId);
-
-            ItemStack[] savedContents = manager.getShulkerContents(shulkerId);
-            if (savedContents != null) {
-                shulkerBlock.getInventory().setContents(savedContents);
-            }
-
-            shulkerBlock.update();
-
-            manager.registerPlacedShulker(location);
-        });
+        manager.registerPlacedShulker(location);
     }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
@@ -113,50 +72,9 @@ public class ShulkerBlockListener implements Listener {
             return;
         }
 
-        if (!(event.getBlock().getState() instanceof ShulkerBox shulkerBlock)) {
-            return;
-        }
-
-        PersistentDataContainer blockPdc = shulkerBlock.getPersistentDataContainer();
-        String shulkerId = blockPdc.get(shulkerIdKey, PersistentDataType.STRING);
-
-        if (shulkerId == null) {
-            return;
-        }
-
-        if (manager.isShulkerInUse(shulkerId)) {
-            event.setCancelled(true);
-            plugin.getLogger().warning("Blocked breaking shulker that is in use: " + shulkerId);
-            return;
-        }
-
         Location location = event.getBlock().getLocation();
-
-        ItemStack[] currentContents = shulkerBlock.getInventory().getContents();
-
-        manager.updateShulkerData(shulkerId, currentContents);
-
-        event.setDropItems(false);
-
         manager.unregisterPlacedShulker(location);
 
-        ItemStack drop = new ItemStack(event.getBlock().getType());
-        ItemMeta meta = drop.getItemMeta();
-
-        if (meta != null) {
-            PersistentDataContainer itemPdc = meta.getPersistentDataContainer();
-            itemPdc.set(shulkerIdKey, PersistentDataType.STRING, shulkerId);
-
-            if (meta instanceof BlockStateMeta blockMeta) {
-                ShulkerBox boxState = (ShulkerBox) blockMeta.getBlockState();
-                boxState.getInventory().setContents(currentContents);
-                blockMeta.setBlockState(boxState);
-            }
-
-            drop.setItemMeta(meta);
-        }
-
-        event.getBlock().getWorld().dropItemNaturally(event.getBlock().getLocation(), drop);
     }
 
     @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = true)
@@ -201,34 +119,24 @@ public class ShulkerBlockListener implements Listener {
                 continue;
             }
 
-            PersistentDataContainer pdc = shulkerBlock.getPersistentDataContainer();
-            String shulkerId = pdc.get(shulkerIdKey, PersistentDataType.STRING);
+            ItemStack[] contents = shulkerBlock.getInventory().getContents();
 
-            if (shulkerId != null) {
-                ItemStack[] contents = shulkerBlock.getInventory().getContents();
-                manager.updateShulkerData(shulkerId, contents);
+            shulkerBlock.getInventory().clear();
+            shulkerBlock.update();
 
-                shulkerBlock.getInventory().clear();
-                shulkerBlock.update();
+            manager.unregisterPlacedShulker(block.getLocation());
 
-                manager.unregisterPlacedShulker(block.getLocation());
-
-                ItemStack drop = new ItemStack(block.getType());
-                ItemMeta meta = drop.getItemMeta();
-                if (meta != null) {
-                    meta.getPersistentDataContainer().set(shulkerIdKey, PersistentDataType.STRING, shulkerId);
-                    if (meta instanceof BlockStateMeta blockMeta) {
-                        ShulkerBox box = (ShulkerBox) blockMeta.getBlockState();
-                        box.getInventory().setContents(contents);
-                        blockMeta.setBlockState(box);
-                    }
-                    drop.setItemMeta(meta);
-                }
-
-                block.getWorld().dropItemNaturally(block.getLocation(), drop);
-
-                blocks.remove();
+            ItemStack drop = new ItemStack(block.getType());
+            if (drop.getItemMeta() instanceof BlockStateMeta blockMeta) {
+                ShulkerBox box = (ShulkerBox) blockMeta.getBlockState();
+                box.getInventory().setContents(contents);
+                blockMeta.setBlockState(box);
+                drop.setItemMeta(blockMeta);
             }
+
+            block.getWorld().dropItemNaturally(block.getLocation(), drop);
+
+            blocks.remove();
         }
     }
 
@@ -267,14 +175,17 @@ public class ShulkerBlockListener implements Listener {
             return;
         }
 
-        if (manager.isPlacedVirtualShulker(block.getLocation())) {
-            Player player = event.getPlayer();
-            if (player.isSneaking() && player.getInventory().getItemInMainHand().getType().isBlock()) {
-                return;
-            }
+        Player player = event.getPlayer();
 
+        if (manager.hasOpenShulker(player)) {
             event.setCancelled(true);
+            return;
         }
+
+        if (player.isSneaking() && player.getInventory().getItemInMainHand().getType().isBlock()) {
+            return;
+        }
+
     }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
@@ -288,13 +199,7 @@ public class ShulkerBlockListener implements Listener {
             return;
         }
 
-        if (!(block.getState() instanceof ShulkerBox shulkerBlock)) {
-            return;
-        }
-
-        String shulkerId = shulkerBlock.getPersistentDataContainer().get(shulkerIdKey, PersistentDataType.STRING);
-
-        if (shulkerId != null && manager.isShulkerInUse(shulkerId)) {
+        if (manager.hasOpenShulker(event.getPlayer())) {
             event.setCancelled(true);
         }
     }

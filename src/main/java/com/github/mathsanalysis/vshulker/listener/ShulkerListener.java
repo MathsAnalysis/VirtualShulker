@@ -2,7 +2,6 @@ package com.github.mathsanalysis.vshulker.listener;
 
 import com.github.mathsanalysis.vshulker.config.Config;
 import com.github.mathsanalysis.vshulker.manager.VirtualShulkerManager;
-import org.bukkit.GameMode;
 import org.bukkit.Material;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
@@ -10,14 +9,9 @@ import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.block.Action;
 import org.bukkit.event.entity.EntityDamageEvent;
-import org.bukkit.event.entity.EntityPickupItemEvent;
 import org.bukkit.event.entity.PlayerDeathEvent;
 import org.bukkit.event.inventory.*;
-import org.bukkit.event.player.PlayerDropItemEvent;
-import org.bukkit.event.player.PlayerInteractEvent;
-import org.bukkit.event.player.PlayerJoinEvent;
-import org.bukkit.event.player.PlayerQuitEvent;
-import org.bukkit.event.player.PlayerSwapHandItemsEvent;
+import org.bukkit.event.player.*;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemStack;
 
@@ -79,11 +73,6 @@ public record ShulkerListener(VirtualShulkerManager manager) implements Listener
             return;
         }
 
-        String shulkerId = manager.getShulkerIdFromItem(itemInHand);
-        if (shulkerId != null && manager.isShulkerInUse(shulkerId)) {
-            return;
-        }
-
         manager.openShulker(player, itemInHand);
     }
 
@@ -97,7 +86,8 @@ public record ShulkerListener(VirtualShulkerManager manager) implements Listener
             return;
         }
 
-        manager.closeShulkerOnDamage(player);
+        manager.closeShulker(player, true);
+        player.closeInventory();
     }
 
     @EventHandler(priority = EventPriority.LOWEST)
@@ -145,22 +135,6 @@ public record ShulkerListener(VirtualShulkerManager manager) implements Listener
                 }
             }
         }
-
-        String openShulkerId = manager.getOpenShulkerId(player);
-        if (openShulkerId != null && clickedInv != null && !clickedInv.equals(topInv)) {
-            String clickedId = manager.getShulkerIdFromItem(clicked);
-            if (openShulkerId.equals(clickedId)) {
-                event.setCancelled(true);
-                return;
-            }
-        }
-
-        if (event.getClick() == ClickType.CREATIVE && isShulkerBox(clicked)) {
-            String clickedId = manager.getShulkerIdFromItem(clicked);
-            if (clickedId != null) {
-                event.setCancelled(true);
-            }
-        }
     }
 
     @EventHandler(priority = EventPriority.LOWEST)
@@ -185,40 +159,6 @@ public record ShulkerListener(VirtualShulkerManager manager) implements Listener
     }
 
     @EventHandler(priority = EventPriority.LOWEST)
-    public void onInventoryMoveItem(InventoryMoveItemEvent event) {
-        Inventory source = event.getSource();
-        Inventory destination = event.getDestination();
-
-        ItemStack movedItem = event.getItem();
-        if (isShulkerBox(movedItem)) {
-            String movedId = manager.getShulkerIdFromItem(movedItem);
-            if (movedId != null && manager.isShulkerInUse(movedId)) {
-                event.setCancelled(true);
-                manager.getPlugin().getLogger().warning("Blocked automatic movement of in-use shulker: " + movedId);
-                return;
-            }
-        }
-
-        for (Object viewer : source.getViewers()) {
-            if (viewer instanceof Player player) {
-                if (manager.hasOpenShulker(player) && !manager.isValidSession(player, source)) {
-                    event.setCancelled(true);
-                    return;
-                }
-            }
-        }
-
-        for (Object viewer : destination.getViewers()) {
-            if (viewer instanceof Player player) {
-                if (manager.hasOpenShulker(player) && !manager.isValidSession(player, destination)) {
-                    event.setCancelled(true);
-                    return;
-                }
-            }
-        }
-    }
-
-    @EventHandler(priority = EventPriority.LOWEST)
     public void onPlayerDropItem(PlayerDropItemEvent event) {
         Player player = event.getPlayer();
 
@@ -227,15 +167,7 @@ public record ShulkerListener(VirtualShulkerManager manager) implements Listener
         }
 
         ItemStack droppedItem = event.getItemDrop().getItemStack();
-
         if (isShulkerBox(droppedItem)) {
-            event.setCancelled(true);
-            return;
-        }
-
-        String openId = manager.getOpenShulkerId(player);
-        String droppedId = manager.getShulkerIdFromItem(droppedItem);
-        if (openId != null && openId.equals(droppedId)) {
             event.setCancelled(true);
         }
     }
@@ -250,61 +182,6 @@ public record ShulkerListener(VirtualShulkerManager manager) implements Listener
 
         if (isShulkerBox(event.getMainHandItem()) || isShulkerBox(event.getOffHandItem())) {
             event.setCancelled(true);
-        }
-    }
-
-    @EventHandler(priority = EventPriority.LOWEST)
-    public void onEntityPickupItem(EntityPickupItemEvent event) {
-        if (!(event.getEntity() instanceof Player player)) {
-            return;
-        }
-
-        if (!manager.hasOpenShulker(player)) {
-            return;
-        }
-
-        ItemStack item = event.getItem().getItemStack();
-        if (isShulkerBox(item)) {
-            String openId = manager.getOpenShulkerId(player);
-            String pickupId = manager.getShulkerIdFromItem(item);
-            if (openId != null && openId.equals(pickupId)) {
-                event.setCancelled(true);
-            }
-        }
-    }
-
-    @EventHandler(priority = EventPriority.LOWEST)
-    public void onCreativeInventory(InventoryCreativeEvent event) {
-        if (!(event.getWhoClicked() instanceof Player player)) {
-            return;
-        }
-
-        if (player.getGameMode() != GameMode.CREATIVE) {
-            return;
-        }
-
-        ItemStack item = event.getCursor();
-        if (isShulkerBox(item)) {
-            String originalId = manager.getShulkerIdFromItem(item);
-            if (originalId != null) {
-                if (manager.isShulkerInUse(originalId)) {
-                    event.setCancelled(true);
-                    manager.getPlugin().getLogger().warning(
-                            "Blocked creative duplication of in-use shulker: " + originalId +
-                                    " by " + player.getName()
-                    );
-                    return;
-                }
-
-                ItemStack newItem = item.clone();
-                manager.regenerateShulkerId(newItem, originalId, player.getUniqueId());
-                event.setCursor(newItem);
-
-                manager.getPlugin().getLogger().info(
-                        "Regenerated shulker ID for creative duplication by " + player.getName() +
-                                ": " + originalId + " -> " + manager.getShulkerIdFromItem(newItem)
-                );
-            }
         }
     }
 
@@ -326,25 +203,14 @@ public record ShulkerListener(VirtualShulkerManager manager) implements Listener
     }
 
     @EventHandler(priority = EventPriority.LOWEST)
-    public void onPlayerJoin(PlayerJoinEvent event) {
-        Player player = event.getPlayer();
-
-        manager.migrateLazyPlayer(player);
-
-        manager.loadPlayerOwnership(player);
-    }
-
-    @EventHandler(priority = EventPriority.LOWEST)
     public void onPlayerQuit(PlayerQuitEvent event) {
         Player player = event.getPlayer();
 
         if (manager.hasOpenShulker(player)) {
-            manager.closeShulker(player, true, true);
+            manager.closeShulker(player, true);
         } else if (manager.isLoading(player)) {
             manager.cancelLoading(player);
         }
-
-        manager.unloadPlayerOwnership(player);
     }
 
     @EventHandler(priority = EventPriority.LOWEST)
@@ -352,7 +218,7 @@ public record ShulkerListener(VirtualShulkerManager manager) implements Listener
         Player player = event.getEntity();
 
         if (manager.hasOpenShulker(player)) {
-            manager.closeShulker(player, true, true);
+            manager.closeShulker(player, true);
         } else if (manager.isLoading(player)) {
             manager.cancelLoading(player);
         }
