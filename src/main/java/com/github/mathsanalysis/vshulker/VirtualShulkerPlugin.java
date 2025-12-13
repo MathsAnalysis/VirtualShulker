@@ -27,14 +27,10 @@ public final class VirtualShulkerPlugin extends JavaPlugin {
         manager.initialize();
 
         registerListeners();
-        registerCommands();
-        startTasks();
 
-        getLogger().info("========================================");
-        getLogger().info("VirtualShulker enabled!");
-        getLogger().info("Mode: NBT-only (no database, no IDs)");
-        getLogger().info("Contents stored directly in items");
-        getLogger().info("========================================");
+        registerCommands();
+
+        startTasks();
     }
 
     @Override
@@ -50,15 +46,11 @@ public final class VirtualShulkerPlugin extends JavaPlugin {
         if (manager != null) {
             manager.shutdown();
         }
-
-        getLogger().info("VirtualShulker disabled");
     }
 
     public void reload() {
         reloadConfig();
         Config.load(this);
-        manager.reloadCache();
-        getLogger().info("VirtualShulker reloaded");
     }
 
     public static VirtualShulkerPlugin getInstance() {
