@@ -20,21 +20,13 @@ import java.util.concurrent.locks.ReentrantLock;
 public final class VirtualShulkerManager {
 
     private static VirtualShulkerManager instance;
-
     private final VirtualShulkerPlugin plugin;
-
     private final Map<UUID, ShulkerSession> activeSessions;
-
     private final Set<UUID> loadingPlayers;
-
     private final Set<Location> placedShulkerLocations;
-
     private final Map<String, UUID> shulkerLocks;
-
     private final Map<UUID, ReentrantLock> playerLocks;
-
     private final Map<UUID, Long> lastOpenTimestamp;
-
     private static final long OPEN_COOLDOWN_MS = 100;
 
     public VirtualShulkerManager(VirtualShulkerPlugin plugin) {
@@ -77,7 +69,6 @@ public final class VirtualShulkerManager {
         }
 
         UUID playerId = player.getUniqueId();
-
         ReentrantLock playerLock = playerLocks.computeIfAbsent(playerId, k -> new ReentrantLock());
 
         if (!playerLock.tryLock()) {
@@ -143,16 +134,11 @@ public final class VirtualShulkerManager {
                 }
 
                 ItemStack[] contents = getContentsFromNBT(shulkerBox);
-
                 Inventory inventory = createInventory(contents);
-
                 shulkerLocks.put(shulkerHash, playerId);
-
                 ShulkerSession session = new ShulkerSession(inventory, slot, shulkerHash);
                 activeSessions.put(playerId, session);
-
                 player.openInventory(inventory);
-
                 plugin.getLogger().fine("Opened shulker for " + player.getName() + " from slot: " + slot +
                         " [hash: " + shulkerHash + "]");
 
@@ -167,7 +153,6 @@ public final class VirtualShulkerManager {
 
     public void closeShulker(Player player, boolean save) {
         UUID playerId = player.getUniqueId();
-
         ReentrantLock playerLock = playerLocks.computeIfAbsent(playerId, k -> new ReentrantLock());
 
         playerLock.lock();
@@ -315,38 +300,40 @@ public final class VirtualShulkerManager {
         ItemStack shulkerItem = null;
 
         switch (slot.type) {
-            case MAIN_HAND-> {
+            case MAIN_HAND:
                 shulkerItem = player.getInventory().getItemInMainHand();
-
                 if (isShulkerBox(shulkerItem)) {
                     setContentsToNBT(shulkerItem, contents);
                     player.getInventory().setItemInMainHand(shulkerItem);
                 }
-            }
-            case OFF_HAND->{
+                break;
+
+            case OFF_HAND:
                 shulkerItem = player.getInventory().getItemInOffHand();
                 if (isShulkerBox(shulkerItem)) {
                     setContentsToNBT(shulkerItem, contents);
                     player.getInventory().setItemInOffHand(shulkerItem);
                 }
-            }
-            case INVENTORY->{
+                break;
+
+            case INVENTORY:
                 shulkerItem = player.getInventory().getItem(slot.slotIndex);
                 if (isShulkerBox(shulkerItem)) {
                     setContentsToNBT(shulkerItem, contents);
                     player.getInventory().setItem(slot.slotIndex, shulkerItem);
                 }
-            }
-            case ENDER_CHEST->{
+                break;
+
+            case ENDER_CHEST:
                 shulkerItem = player.getEnderChest().getItem(slot.slotIndex);
                 if (isShulkerBox(shulkerItem)) {
                     setContentsToNBT(shulkerItem, contents);
                     player.getEnderChest().setItem(slot.slotIndex, shulkerItem);
                 }
-            }
+                break;
         }
 
-        if (!isShulkerBox(shulkerItem)) {
+        if (shulkerItem == null || !isShulkerBox(shulkerItem)) {
             plugin.getLogger().warning("CRITICAL: Shulker disappeared from slot during close: " + slot);
             plugin.getLogger().warning("Contents preserved in memory but could not update NBT!");
             plugin.getLogger().warning("This should never happen - please report this bug!");
@@ -487,39 +474,23 @@ public final class VirtualShulkerManager {
         ENDER_CHEST
     }
 
-    public VirtualShulkerPlugin getPlugin() {
-        return plugin;
-    }
 
-    public void reloadCache() {
-    }
+    public void saveShulkerContents(Player player, ItemStack[] contents) {
+        UUID playerId = player.getUniqueId();
+        ShulkerSession session = activeSessions.get(playerId);
 
-    public Map<String, UUID> getActiveLocks() {
-        return Collections.unmodifiableMap(shulkerLocks);
-    }
+        if (session == null) {
+            plugin.getLogger().warning("Attempted to save shulker contents for player without active session: " + player.getName());
+            return;
+        }
 
-    public Set<String> getLockedIds() {
-        return Collections.unmodifiableSet(shulkerLocks.keySet());
-    }
+        if (!verifyShulkerStillInSlot(player, session.slot, null)) {
+            plugin.getLogger().warning("Shulker disappeared during manual save for " + player.getName());
+            dropContentsToPlayer(player, contents);
+            return;
+        }
 
-    public Map<UUID, Long> getLoadingTimestamps() {
-        return Collections.unmodifiableMap(lastOpenTimestamp);
-    }
-
-    public Object getDatabase() {
-        return null;
-    }
-
-    public Map<String, ItemStack[]> getPendingSaves() {
-        return Collections.emptyMap();
-    }
-
-    public void migrateLazyPlayer(Player player) {
-    }
-
-    public void loadPlayerOwnership(Player player) {
-    }
-
-    public void unloadPlayerOwnership(Player player) {
+        updateShulkerInSlot(player, session.slot, contents);
+        plugin.getLogger().fine("Manually saved shulker contents for " + player.getName());
     }
 }

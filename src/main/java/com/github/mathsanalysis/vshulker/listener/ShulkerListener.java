@@ -12,11 +12,14 @@ import org.bukkit.event.entity.EntityDamageEvent;
 import org.bukkit.event.entity.PlayerDeathEvent;
 import org.bukkit.event.inventory.*;
 import org.bukkit.event.player.*;
+import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemStack;
 
 import java.util.Set;
 
-public record ShulkerListener(VirtualShulkerManager manager) implements Listener {
+public class ShulkerListener implements Listener {
+
+    private final VirtualShulkerManager manager;
 
     private static final Set<Material> SHULKER_BOXES = Set.of(
             Material.SHULKER_BOX,
@@ -37,6 +40,10 @@ public record ShulkerListener(VirtualShulkerManager manager) implements Listener
             Material.RED_SHULKER_BOX,
             Material.BLACK_SHULKER_BOX
     );
+
+    public ShulkerListener(VirtualShulkerManager manager) {
+        this.manager = manager;
+    }
 
     @EventHandler(priority = EventPriority.HIGHEST)
     public void onPlayerInteract(PlayerInteractEvent event) {
@@ -106,13 +113,15 @@ public record ShulkerListener(VirtualShulkerManager manager) implements Listener
 
         ItemStack clicked = event.getCurrentItem();
         ItemStack cursor = event.getCursor();
+        Inventory clickedInv = event.getClickedInventory();
+        Inventory topInv = event.getView().getTopInventory();
 
-        if (isShulkerBox(cursor)) {
+        if (isShulkerBox(cursor) && clickedInv != null && clickedInv.equals(topInv)) {
             event.setCancelled(true);
             return;
         }
 
-        if (isShulkerBox(clicked)) {
+        if (isShulkerBox(clicked) && clickedInv != null && clickedInv.equals(topInv)) {
             event.setCancelled(true);
             return;
         }
@@ -126,22 +135,12 @@ public record ShulkerListener(VirtualShulkerManager manager) implements Listener
             int hotbar = event.getHotbarButton();
             if (hotbar >= 0) {
                 ItemStack hotbarItem = player.getInventory().getItem(hotbar);
-                if (isShulkerBox(hotbarItem)) {
+                if (isShulkerBox(hotbarItem) || isShulkerBox(clicked)) {
                     event.setCancelled(true);
                     return;
                 }
             }
         }
-
-        if (event.getClick() == ClickType.CREATIVE && isShulkerBox(clicked)) {
-            event.setCancelled(true);
-            return;
-        }
-
-        manager.getPlugin().getServer().getScheduler().runTask(
-                manager.getPlugin(),
-                () -> manager.saveShulkerContents(player)
-        );
     }
 
     @EventHandler(priority = EventPriority.LOWEST)
@@ -162,13 +161,7 @@ public record ShulkerListener(VirtualShulkerManager manager) implements Listener
         ItemStack dragged = event.getOldCursor();
         if (isShulkerBox(dragged)) {
             event.setCancelled(true);
-            return;
         }
-
-        manager.getPlugin().getServer().getScheduler().runTask(
-                manager.getPlugin(),
-                () -> manager.saveShulkerContents(player)
-        );
     }
 
     @EventHandler(priority = EventPriority.LOWEST)
