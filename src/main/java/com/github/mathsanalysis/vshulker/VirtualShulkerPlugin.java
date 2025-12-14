@@ -6,6 +6,7 @@ import com.github.mathsanalysis.vshulker.listener.ShulkerBlockListener;
 import com.github.mathsanalysis.vshulker.listener.ShulkerListener;
 import com.github.mathsanalysis.vshulker.manager.VirtualShulkerManager;
 import com.github.mathsanalysis.vshulker.tasks.SessionCleanupTask;
+import com.github.mathsanalysis.vshulker.tasks.SessionValidationTask;
 import org.bukkit.plugin.java.JavaPlugin;
 import revxrsal.commands.bukkit.BukkitCommandHandler;
 
@@ -16,6 +17,7 @@ public final class VirtualShulkerPlugin extends JavaPlugin {
     private VirtualShulkerManager manager;
     private BukkitCommandHandler commandHandler;
     private SessionCleanupTask cleanupTask;
+    private SessionValidationTask validationTask;
 
     @Override
     public void onEnable() {
@@ -27,14 +29,24 @@ public final class VirtualShulkerPlugin extends JavaPlugin {
         manager.initialize();
 
         registerListeners();
-
         registerCommands();
-
         startTasks();
+
+        getLogger().info("========================================");
+        getLogger().info("VirtualShulker enabled!");
+        getLogger().info("Mode: NBT-only (no database, no IDs)");
+        getLogger().info("Contents stored directly in items");
+        getLogger().info("Anti-Dupe: MAXIMUM SECURITY");
+        getLogger().info("Validation: Every 10 ticks (0.5s)");
+        getLogger().info("========================================");
     }
 
     @Override
     public void onDisable() {
+        if (validationTask != null) {
+            validationTask.cancel();
+        }
+
         if (cleanupTask != null) {
             cleanupTask.cancel();
         }
@@ -46,11 +58,14 @@ public final class VirtualShulkerPlugin extends JavaPlugin {
         if (manager != null) {
             manager.shutdown();
         }
+
+        getLogger().info("VirtualShulker disabled");
     }
 
     public void reload() {
         reloadConfig();
         Config.load(this);
+        getLogger().info("VirtualShulker reloaded");
     }
 
     public static VirtualShulkerPlugin getInstance() {
@@ -81,5 +96,8 @@ public final class VirtualShulkerPlugin extends JavaPlugin {
     private void startTasks() {
         cleanupTask = new SessionCleanupTask(this, manager);
         cleanupTask.start();
+
+        validationTask = new SessionValidationTask(this, manager);
+        validationTask.start();
     }
 }

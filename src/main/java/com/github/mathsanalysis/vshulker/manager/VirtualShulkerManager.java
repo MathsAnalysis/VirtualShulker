@@ -4,6 +4,7 @@ import com.github.mathsanalysis.vshulker.VirtualShulkerPlugin;
 import com.github.mathsanalysis.vshulker.config.Config;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
+import net.kyori.adventure.text.format.TextDecoration;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.Material;
@@ -15,28 +16,24 @@ import org.bukkit.block.ShulkerBox;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.locks.ReentrantLock;
 
 public final class VirtualShulkerManager {
 
     private static VirtualShulkerManager instance;
+
     private final VirtualShulkerPlugin plugin;
+
     private final Map<UUID, ShulkerSession> activeSessions;
+
     private final Set<UUID> loadingPlayers;
+
     private final Set<Location> placedShulkerLocations;
-    private final Map<String, UUID> shulkerLocks;
-    private final Map<UUID, ReentrantLock> playerLocks;
-    private final Map<UUID, Long> lastOpenTimestamp;
-    private static final long OPEN_COOLDOWN_MS = 100;
 
     public VirtualShulkerManager(VirtualShulkerPlugin plugin) {
         this.plugin = plugin;
         this.activeSessions = new ConcurrentHashMap<>();
         this.loadingPlayers = ConcurrentHashMap.newKeySet();
         this.placedShulkerLocations = ConcurrentHashMap.newKeySet();
-        this.shulkerLocks = new ConcurrentHashMap<>();
-        this.playerLocks = new ConcurrentHashMap<>();
-        this.lastOpenTimestamp = new ConcurrentHashMap<>();
     }
 
     public static VirtualShulkerManager getInstance(VirtualShulkerPlugin plugin) {
@@ -47,20 +44,7 @@ public final class VirtualShulkerManager {
     }
 
     public void initialize() {
-        plugin.getLogger().info("VirtualShulkerManager initialized (NBT-only, WITH ANTI-DUPE PROTECTION)");
-    }
-
-    private String generateShulkerHash(ItemStack shulkerBox) {
-        if (shulkerBox == null || !isShulkerBox(shulkerBox)) {
-            return null;
-        }
-
-        int hash = shulkerBox.hashCode();
-        if (shulkerBox.hasItemMeta()) {
-            hash = 31 * hash + Objects.hashCode(shulkerBox.getItemMeta());
-        }
-
-        return "shulker_" + hash + "_" + shulkerBox.getType().name();
+        plugin.getLogger().info("VirtualShulkerManager initialized (NBT-only, NO ID system)");
     }
 
     public void openShulker(Player player, ItemStack shulkerBox) {
@@ -69,171 +53,216 @@ public final class VirtualShulkerManager {
         }
 
         UUID playerId = player.getUniqueId();
-        ReentrantLock playerLock = playerLocks.computeIfAbsent(playerId, k -> new ReentrantLock());
 
-        if (!playerLock.tryLock()) {
-            plugin.getLogger().warning("ANTI-DUPE: Blocked concurrent shulker operation for " + player.getName());
-            player.sendMessage(Component.text("Please wait, operation in progress...", NamedTextColor.YELLOW));
+        if (activeSessions.containsKey(playerId)) {
+            player.sendMessage(Component.text("You already have a shulker open!", NamedTextColor.YELLOW));
             return;
         }
 
+        if (loadingPlayers.contains(playerId)) {
+            player.sendMessage(Component.text("Loading shulker, please wait...", NamedTextColor.YELLOW));
+            return;
+        }
+
+        loadingPlayers.add(playerId);
+
         try {
-            Long lastOpen = lastOpenTimestamp.get(playerId);
-            long now = System.currentTimeMillis();
-            if (lastOpen != null && (now - lastOpen) < OPEN_COOLDOWN_MS) {
-                plugin.getLogger().warning("ANTI-DUPE: Blocked too fast shulker open for " + player.getName() +
-                        " (cooldown: " + (now - lastOpen) + "ms)");
+            ShulkerSlot slot = findShulkerSlot(player, shulkerBox);
+
+            if (slot == null) {
+                plugin.getLogger().warning("Could not find shulker in player inventory: " + player.getName());
+                player.sendMessage(Component.text("Error: Could not locate shulker", NamedTextColor.RED));
                 return;
             }
 
-            if (activeSessions.containsKey(playerId)) {
-                player.sendMessage(Component.text("You already have a shulker open!", NamedTextColor.YELLOW));
-                return;
-            }
+            ItemStack[] contents = getContentsFromNBT(shulkerBox);
 
-            if (loadingPlayers.contains(playerId)) {
-                player.sendMessage(Component.text("Loading shulker, please wait...", NamedTextColor.YELLOW));
-                return;
-            }
+            Inventory inventory = createInventory(contents);
 
-            String shulkerHash = generateShulkerHash(shulkerBox);
-            if (shulkerHash == null) {
-                plugin.getLogger().severe("Failed to generate shulker hash!");
-                return;
-            }
+            ShulkerSession session = new ShulkerSession(inventory, slot, shulkerBox.clone());
+            activeSessions.put(playerId, session);
 
-            UUID lockOwner = shulkerLocks.get(shulkerHash);
-            if (lockOwner != null && !lockOwner.equals(playerId)) {
-                Player otherPlayer = Bukkit.getPlayer(lockOwner);
-                if (otherPlayer != null && otherPlayer.isOnline()) {
-                    plugin.getLogger().warning("ANTI-DUPE: Blocked duplicate shulker open attempt by " + player.getName() +
-                            " - same shulker already open by " + otherPlayer.getName());
-                    player.sendMessage(Component.text("This shulker is already being accessed!", NamedTextColor.RED));
-                    return;
-                } else {
-                    shulkerLocks.remove(shulkerHash);
-                    plugin.getLogger().info("Removed stale shulker lock for hash: " + shulkerHash);
-                }
-            }
+            player.openInventory(inventory);
 
-            loadingPlayers.add(playerId);
-            lastOpenTimestamp.put(playerId, now);
-
-            try {
-                ShulkerSlot slot = findShulkerSlot(player, shulkerBox);
-
-                if (slot == null) {
-                    plugin.getLogger().warning("Could not find shulker in player inventory: " + player.getName());
-                    player.sendMessage(Component.text("Error: Could not locate shulker", NamedTextColor.RED));
-                    return;
-                }
-
-                if (!verifyShulkerStillInSlot(player, slot, shulkerBox)) {
-                    plugin.getLogger().warning("ANTI-DUPE: Shulker disappeared/changed during open for " + player.getName());
-                    return;
-                }
-
-                ItemStack[] contents = getContentsFromNBT(shulkerBox);
-                Inventory inventory = createInventory(contents);
-                shulkerLocks.put(shulkerHash, playerId);
-                ShulkerSession session = new ShulkerSession(inventory, slot, shulkerHash);
-                activeSessions.put(playerId, session);
-                player.openInventory(inventory);
-                plugin.getLogger().fine("Opened shulker for " + player.getName() + " from slot: " + slot +
-                        " [hash: " + shulkerHash + "]");
-
-            } finally {
-                loadingPlayers.remove(playerId);
-            }
+            plugin.getLogger().fine("Opened shulker for " + player.getName() + " from slot: " + slot);
 
         } finally {
-            playerLock.unlock();
+            loadingPlayers.remove(playerId);
         }
     }
 
     public void closeShulker(Player player, boolean save) {
         UUID playerId = player.getUniqueId();
-        ReentrantLock playerLock = playerLocks.computeIfAbsent(playerId, k -> new ReentrantLock());
 
-        playerLock.lock();
-        try {
-            ShulkerSession session = activeSessions.remove(playerId);
-            loadingPlayers.remove(playerId);
+        ShulkerSession session = activeSessions.remove(playerId);
+        loadingPlayers.remove(playerId);
 
-            if (session == null) {
+        if (session == null) {
+            return;
+        }
+
+        if (save) {
+            ItemStack currentShulker = getCurrentShulkerInSlot(player, session.slot);
+
+            if (currentShulker == null || !isShulkerBox(currentShulker)) {
+                plugin.getLogger().severe("═══════════════════════════════════════════════");
+                plugin.getLogger().severe("ANTI-DUPE: Shulker disappeared/invalid");
+                plugin.getLogger().severe("Player: " + player.getName());
+                plugin.getLogger().severe("Slot: " + session.slot);
+                plugin.getLogger().severe("Action: BLOCK SAVE - NO DUPLICATION ALLOWED");
+                plugin.getLogger().severe("═══════════════════════════════════════════════");
+
+                player.sendMessage(Component.text("Session closed: Shulker was moved!", NamedTextColor.RED));
+                player.sendMessage(Component.text("Changes NOT saved!", NamedTextColor.GOLD));
                 return;
             }
 
-            if (session.shulkerHash != null) {
-                UUID lockOwner = shulkerLocks.remove(session.shulkerHash);
-                if (lockOwner != null && !lockOwner.equals(playerId)) {
-                    plugin.getLogger().warning("ANTI-DUPE WARNING: Lock owner mismatch on close! " +
-                            "Expected: " + playerId + ", Got: " + lockOwner);
-                }
+            if (!isSameShulker(currentShulker, session.originalShulker)) {
+                plugin.getLogger().severe("═══════════════════════════════════════════════");
+                plugin.getLogger().severe("ANTI-DUPE: Shulker was replaced");
+                plugin.getLogger().severe("Player: " + player.getName());
+                plugin.getLogger().severe("Slot: " + session.slot);
+                plugin.getLogger().severe("Original: " + session.originalShulker.getType());
+                plugin.getLogger().severe("Current: " + currentShulker.getType());
+                plugin.getLogger().severe("Action: BLOCK SAVE - NO DUPLICATION ALLOWED");
+                plugin.getLogger().severe("═══════════════════════════════════════════════");
+
+                player.sendMessage(Component.text("Session closed: Shulker was replaced!", NamedTextColor.RED));
+                player.sendMessage(Component.text("Changes NOT saved!", NamedTextColor.GOLD));
+                return;
             }
 
-            if (save) {
-                if (!verifyShulkerStillInSlot(player, session.slot, null)) {
-                    plugin.getLogger().severe("ANTI-DUPE: Shulker disappeared during close for " + player.getName() +
-                            " - CONTENTS MAY BE LOST!");
-                    dropContentsToPlayer(player, session.inventory.getContents());
-                    return;
-                }
+            ItemStack[] contents = session.inventory.getContents();
+            updateShulkerInSlot(player, session.slot, contents);
 
-                ItemStack[] contents = session.inventory.getContents();
-                updateShulkerInSlot(player, session.slot, contents);
-                plugin.getLogger().fine("Saved shulker for " + player.getName() + " to slot: " + session.slot);
-            }
-        } finally {
-            playerLock.unlock();
+            plugin.getLogger().fine("Saved shulker for " + player.getName() + " to slot: " + session.slot);
         }
     }
 
-    private boolean verifyShulkerStillInSlot(Player player, ShulkerSlot slot, ItemStack originalShulker) {
-        ItemStack currentItem = null;
-
-        switch (slot.type) {
-            case MAIN_HAND:
-                currentItem = player.getInventory().getItemInMainHand();
-                break;
-            case OFF_HAND:
-                currentItem = player.getInventory().getItemInOffHand();
-                break;
-            case INVENTORY:
-                currentItem = player.getInventory().getItem(slot.slotIndex);
-                break;
-            case ENDER_CHEST:
-                currentItem = player.getEnderChest().getItem(slot.slotIndex);
-                break;
-        }
-
-        if (currentItem == null || !isShulkerBox(currentItem)) {
+    public boolean isOpenedShulker(Player player, ItemStack item) {
+        if (item == null || !isShulkerBox(item)) {
             return false;
         }
 
-        if (originalShulker != null) {
-            return isSameShulker(currentItem, originalShulker);
+        ShulkerSession session = activeSessions.get(player.getUniqueId());
+        if (session == null) {
+            return false;
         }
 
-        return true;
+        return isSameShulker(item, session.originalShulker);
     }
 
-    private void dropContentsToPlayer(Player player, ItemStack[] contents) {
-        if (contents == null) return;
+    public boolean isOpenedShulkerInInventory(Player player) {
+        ShulkerSession session = activeSessions.get(player.getUniqueId());
+        if (session == null) {
+            return false;
+        }
 
-        int droppedCount = 0;
-        for (ItemStack item : contents) {
-            if (item != null && item.getType() != Material.AIR) {
-                player.getWorld().dropItemNaturally(player.getLocation(), item);
-                droppedCount++;
+        return session.slot.type == SlotType.MAIN_HAND ||
+                session.slot.type == SlotType.OFF_HAND ||
+                session.slot.type == SlotType.INVENTORY;
+    }
+
+    public void scheduleAutoSave(Player player) {
+        performAutoSave(player);
+    }
+
+    private void performAutoSave(Player player) {
+        UUID playerId = player.getUniqueId();
+        ShulkerSession session = activeSessions.get(playerId);
+
+        if (session == null) {
+            return;
+        }
+
+        ItemStack currentShulker = getCurrentShulkerInSlot(player, session.slot);
+
+        if (currentShulker == null || !isShulkerBox(currentShulker) || !isSameShulker(currentShulker, session.originalShulker)) {
+            plugin.getLogger().warning("AUTO-SAVE BLOCKED: Shulker validation failed for " + player.getName());
+            return;
+        }
+
+        ItemStack[] contents = session.inventory.getContents();
+        updateShulkerInSlot(player, session.slot, contents);
+    }
+
+    public void performImmediateValidation(Player player) {
+        UUID playerId = player.getUniqueId();
+        ShulkerSession session = activeSessions.get(playerId);
+
+        if (session == null) {
+            return;
+        }
+
+        ItemStack currentShulker = getCurrentShulkerInSlot(player, session.slot);
+
+        if (currentShulker == null || !isShulkerBox(currentShulker) || !isSameShulker(currentShulker, session.originalShulker)) {
+            plugin.getLogger().severe("IMMEDIATE VALIDATION FAILED - Closing session for " + player.getName());
+
+            activeSessions.remove(playerId);
+            player.closeInventory();
+            player.sendMessage(Component.text("ANTI-DUPE: Manipulation detected!", NamedTextColor.DARK_RED));
+            player.sendMessage(Component.text("Changes NOT saved!", NamedTextColor.GOLD));
+        }
+    }
+
+    public void validateAllSessions() {
+        for (Map.Entry<UUID, ShulkerSession> entry : new HashMap<>(activeSessions).entrySet()) {
+            Player player = Bukkit.getPlayer(entry.getKey());
+            if (player == null || !player.isOnline()) {
+                activeSessions.remove(entry.getKey());
+                continue;
+            }
+
+            ShulkerSession session = entry.getValue();
+            ItemStack currentShulker = getCurrentShulkerInSlot(player, session.slot);
+
+            boolean manipulated = false;
+            String reason = "";
+
+            if (currentShulker == null) {
+                manipulated = true;
+                reason = "Shulker is NULL";
+            } else if (!isShulkerBox(currentShulker)) {
+                manipulated = true;
+                reason = "Item is not a shulker box (type: " + currentShulker.getType() + ")";
+            } else if (!isSameShulker(currentShulker, session.originalShulker)) {
+                manipulated = true;
+                reason = "Shulker was replaced (original: " + session.originalShulker.getType() + ", current: " + currentShulker.getType() + ")";
+            }
+
+            if (manipulated) {
+                activeSessions.remove(entry.getKey());
+
+                String finalReason = reason;
+
+                Component text = Component.text("════════════════════════", NamedTextColor.RED).decorate(TextDecoration.STRIKETHROUGH)
+                        .append(Component.newline())
+                        .append(Component.text("MANIPULATION DETECTED: " + finalReason, NamedTextColor.RED))
+                        .append(Component.text("Player: " + player.getName(), NamedTextColor.RED))
+                        .append(Component.text("Slot: " + session.slot, NamedTextColor.RED))
+                        .append(Component.text("Action: FORCE CLOSE WITHOUT SAVE", NamedTextColor.RED))
+                        .append(Component.newline())
+                        .append(Component.text("════════════════════════", NamedTextColor.RED).decorate(TextDecoration.STRIKETHROUGH));
+
+                for (Player allPlayers : Bukkit.getOnlinePlayers()) {
+                    if (allPlayers.hasPermission("virtualshulker.admin")) {
+                         allPlayers.sendMessage(text);
+                    }
+                }
+
+                Bukkit.getScheduler().runTask(plugin, () -> player.closeInventory());
             }
         }
+    }
 
-        if (droppedCount > 0) {
-            player.sendMessage(Component.text("Warning: Shulker disappeared! Dropped " + droppedCount +
-                    " items at your location.", NamedTextColor.RED));
-            plugin.getLogger().warning("Dropped " + droppedCount + " items from lost shulker for " + player.getName());
-        }
+    private ItemStack getCurrentShulkerInSlot(Player player, ShulkerSlot slot) {
+        return switch (slot.type) {
+            case MAIN_HAND -> player.getInventory().getItemInMainHand();
+            case OFF_HAND -> player.getInventory().getItemInOffHand();
+            case INVENTORY -> player.getInventory().getItem(slot.slotIndex);
+            case ENDER_CHEST -> player.getEnderChest().getItem(slot.slotIndex);
+        };
     }
 
     private ItemStack[] getContentsFromNBT(ItemStack shulkerBox) {
@@ -345,7 +374,14 @@ public final class VirtualShulkerManager {
         if (!isShulkerBox(item1) || !isShulkerBox(item2)) return false;
         if (item1.getType() != item2.getType()) return false;
 
-        return Objects.equals(item1.getItemMeta(), item2.getItemMeta());
+        if (!(item1.getItemMeta() instanceof BlockStateMeta meta1)) return false;
+        if (!(item2.getItemMeta() instanceof BlockStateMeta meta2)) return false;
+
+        boolean sameDisplayName = Objects.equals(meta1.displayName(), meta2.displayName());
+        boolean sameLore = Objects.equals(meta1.lore(), meta2.lore());
+        boolean sameEnchants = Objects.equals(meta1.getEnchants(), meta2.getEnchants());
+
+        return sameDisplayName && sameLore && sameEnchants;
     }
 
     public boolean hasOpenShulker(Player player) {
@@ -368,24 +404,11 @@ public final class VirtualShulkerManager {
     public void forceCleanupPlayer(Player player) {
         UUID playerId = player.getUniqueId();
 
-        ReentrantLock playerLock = playerLocks.get(playerId);
-        if (playerLock != null) {
-            playerLock.lock();
-            try {
-                loadingPlayers.remove(playerId);
+        loadingPlayers.remove(playerId);
 
-                ShulkerSession session = activeSessions.remove(playerId);
-                if (session != null) {
-                    if (session.shulkerHash != null) {
-                        shulkerLocks.remove(session.shulkerHash);
-                    }
-                    plugin.getLogger().info("Force cleaned up session for: " + player.getName());
-                }
-
-                lastOpenTimestamp.remove(playerId);
-            } finally {
-                playerLock.unlock();
-            }
+        ShulkerSession session = activeSessions.remove(playerId);
+        if (session != null) {
+            plugin.getLogger().info("Force cleaned up session for: " + player.getName());
         }
     }
 
@@ -456,14 +479,11 @@ public final class VirtualShulkerManager {
         activeSessions.clear();
         loadingPlayers.clear();
         placedShulkerLocations.clear();
-        shulkerLocks.clear();
-        playerLocks.clear();
-        lastOpenTimestamp.clear();
 
         plugin.getLogger().info("VirtualShulkerManager shutdown complete");
     }
 
-    private record ShulkerSession(Inventory inventory, ShulkerSlot slot, String shulkerHash) {}
+    private record ShulkerSession(Inventory inventory, ShulkerSlot slot, ItemStack originalShulker) {}
 
     private record ShulkerSlot(SlotType type, int slotIndex) {}
 
@@ -474,23 +494,7 @@ public final class VirtualShulkerManager {
         ENDER_CHEST
     }
 
-
-    public void saveShulkerContents(Player player, ItemStack[] contents) {
-        UUID playerId = player.getUniqueId();
-        ShulkerSession session = activeSessions.get(playerId);
-
-        if (session == null) {
-            plugin.getLogger().warning("Attempted to save shulker contents for player without active session: " + player.getName());
-            return;
-        }
-
-        if (!verifyShulkerStillInSlot(player, session.slot, null)) {
-            plugin.getLogger().warning("Shulker disappeared during manual save for " + player.getName());
-            dropContentsToPlayer(player, contents);
-            return;
-        }
-
-        updateShulkerInSlot(player, session.slot, contents);
-        plugin.getLogger().fine("Manually saved shulker contents for " + player.getName());
+    public VirtualShulkerPlugin getPlugin() {
+        return plugin;
     }
 }

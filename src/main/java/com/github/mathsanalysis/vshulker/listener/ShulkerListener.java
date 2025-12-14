@@ -2,8 +2,11 @@ package com.github.mathsanalysis.vshulker.listener;
 
 import com.github.mathsanalysis.vshulker.config.Config;
 import com.github.mathsanalysis.vshulker.manager.VirtualShulkerManager;
+import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.format.NamedTextColor;
 import org.bukkit.Material;
 import org.bukkit.entity.Player;
+import org.bukkit.event.Event;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
@@ -17,9 +20,7 @@ import org.bukkit.inventory.ItemStack;
 
 import java.util.Set;
 
-public class ShulkerListener implements Listener {
-
-    private final VirtualShulkerManager manager;
+public record ShulkerListener(VirtualShulkerManager manager) implements Listener {
 
     private static final Set<Material> SHULKER_BOXES = Set.of(
             Material.SHULKER_BOX,
@@ -40,10 +41,6 @@ public class ShulkerListener implements Listener {
             Material.RED_SHULKER_BOX,
             Material.BLACK_SHULKER_BOX
     );
-
-    public ShulkerListener(VirtualShulkerManager manager) {
-        this.manager = manager;
-    }
 
     @EventHandler(priority = EventPriority.HIGHEST)
     public void onPlayerInteract(PlayerInteractEvent event) {
@@ -96,6 +93,63 @@ public class ShulkerListener implements Listener {
         player.closeInventory();
     }
 
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = false)
+    public void onInventoryClickPreventMove(InventoryClickEvent event) {
+        if (!(event.getWhoClicked() instanceof Player player)) {
+            return;
+        }
+
+        if (!manager.hasOpenShulker(player)) {
+            return;
+        }
+
+        ItemStack clicked = event.getCurrentItem();
+        ItemStack cursor = event.getCursor();
+
+        if (manager.isOpenedShulker(player, clicked) || manager.isOpenedShulker(player, cursor)) {
+            event.setCancelled(true);
+            event.setResult(Event.Result.DENY);
+            player.sendMessage(Component.text("Cannot move the opened shulker!", NamedTextColor.RED));
+            return;
+        }
+
+        if (event.getClick().isKeyboardClick()) {
+            int hotbar = event.getHotbarButton();
+            if (hotbar >= 0) {
+                ItemStack hotbarItem = player.getInventory().getItem(hotbar);
+                if (manager.isOpenedShulker(player, hotbarItem)) {
+                    event.setCancelled(true);
+                    event.setResult(Event.Result.DENY);
+                    player.sendMessage(Component.text("Cannot move the opened shulker!", NamedTextColor.RED));
+                    return;
+                }
+            }
+        }
+
+        if (event.getClick() == ClickType.SWAP_OFFHAND) {
+            ItemStack offHand = player.getInventory().getItemInOffHand();
+            if (manager.isOpenedShulker(player, offHand)) {
+                event.setCancelled(true);
+                event.setResult(Event.Result.DENY);
+                player.sendMessage(Component.text("Cannot move the opened shulker!", NamedTextColor.RED));
+                return;
+            }
+        }
+    }
+
+    @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = false)
+    public void onInventoryClickValidateFirst(InventoryClickEvent event) {
+        if (!(event.getWhoClicked() instanceof Player player)) {
+            return;
+        }
+
+        if (!manager.hasOpenShulker(player)) {
+            return;
+        }
+
+        manager.performImmediateValidation(player);
+    }
+
     @EventHandler(priority = EventPriority.LOWEST)
     public void onInventoryClick(InventoryClickEvent event) {
         if (!(event.getWhoClicked() instanceof Player player)) {
@@ -115,6 +169,19 @@ public class ShulkerListener implements Listener {
         ItemStack cursor = event.getCursor();
         Inventory clickedInv = event.getClickedInventory();
         Inventory topInv = event.getView().getTopInventory();
+        Inventory bottomInv = event.getView().getBottomInventory();
+
+        if (manager.isOpenedShulker(player, clicked)) {
+            event.setCancelled(true);
+            player.sendMessage(Component.text("Cannot move the opened shulker!", NamedTextColor.RED));
+            return;
+        }
+
+        if (manager.isOpenedShulker(player, cursor)) {
+            event.setCancelled(true);
+            player.sendMessage(Component.text("Cannot move the opened shulker!", NamedTextColor.RED));
+            return;
+        }
 
         if (isShulkerBox(cursor) && clickedInv != null && clickedInv.equals(topInv)) {
             event.setCancelled(true);
@@ -139,7 +206,66 @@ public class ShulkerListener implements Listener {
                     event.setCancelled(true);
                     return;
                 }
+
+                if (manager.isOpenedShulker(player, hotbarItem)) {
+                    event.setCancelled(true);
+                    player.sendMessage(Component.text("Cannot move the opened shulker!", NamedTextColor.RED));
+                    return;
+                }
             }
+        }
+
+        if (clickedInv != null && clickedInv.equals(bottomInv)) {
+            if (event.getClick() == ClickType.NUMBER_KEY) {
+                int slot = event.getHotbarButton();
+                ItemStack hotbarItem = player.getInventory().getItem(slot);
+                if (manager.isOpenedShulker(player, hotbarItem)) {
+                    event.setCancelled(true);
+                    player.sendMessage(Component.text("Cannot move the opened shulker!", NamedTextColor.RED));
+                    return;
+                }
+            }
+
+            if (event.getClick() == ClickType.SWAP_OFFHAND) {
+                ItemStack offHand = player.getInventory().getItemInOffHand();
+                if (manager.isOpenedShulker(player, offHand)) {
+                    event.setCancelled(true);
+                    player.sendMessage(Component.text("Cannot move the opened shulker!", NamedTextColor.RED));
+                    return;
+                }
+            }
+
+            if (event.getClick() == ClickType.DOUBLE_CLICK) {
+                if (manager.isOpenedShulker(player, cursor)) {
+                    event.setCancelled(true);
+                    player.sendMessage(Component.text("Cannot move the opened shulker!", NamedTextColor.RED));
+                    return;
+                }
+            }
+        }
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onInventoryClickAutoSave(InventoryClickEvent event) {
+        if (!(event.getWhoClicked() instanceof Player player)) {
+            return;
+        }
+
+        if (!manager.hasOpenShulker(player)) {
+            return;
+        }
+
+        if (!manager.isValidSession(player, event.getInventory())) {
+            return;
+        }
+
+        Inventory clickedInv = event.getClickedInventory();
+        Inventory topInv = event.getView().getTopInventory();
+
+        if (clickedInv != null && clickedInv.equals(topInv)) {
+            manager.scheduleAutoSave(player);
+        } else if (event.isShiftClick()) {
+            manager.scheduleAutoSave(player);
         }
     }
 
@@ -161,6 +287,35 @@ public class ShulkerListener implements Listener {
         ItemStack dragged = event.getOldCursor();
         if (isShulkerBox(dragged)) {
             event.setCancelled(true);
+            return;
+        }
+
+        if (manager.isOpenedShulker(player, dragged)) {
+            event.setCancelled(true);
+        }
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+    public void onInventoryDragAutoSave(InventoryDragEvent event) {
+        if (!(event.getWhoClicked() instanceof Player player)) {
+            return;
+        }
+
+        if (!manager.hasOpenShulker(player)) {
+            return;
+        }
+
+        if (!manager.isValidSession(player, event.getInventory())) {
+            return;
+        }
+
+        Inventory topInv = event.getView().getTopInventory();
+
+        for (int slot : event.getRawSlots()) {
+            if (slot < topInv.getSize()) {
+                manager.scheduleAutoSave(player);
+                return;
+            }
         }
     }
 
@@ -175,6 +330,11 @@ public class ShulkerListener implements Listener {
         ItemStack droppedItem = event.getItemDrop().getItemStack();
         if (isShulkerBox(droppedItem)) {
             event.setCancelled(true);
+            return;
+        }
+
+        if (manager.isOpenedShulker(player, droppedItem)) {
+            event.setCancelled(true);
         }
     }
 
@@ -187,6 +347,12 @@ public class ShulkerListener implements Listener {
         }
 
         if (isShulkerBox(event.getMainHandItem()) || isShulkerBox(event.getOffHandItem())) {
+            event.setCancelled(true);
+            return;
+        }
+
+        if (manager.isOpenedShulker(player, event.getMainHandItem()) ||
+                manager.isOpenedShulker(player, event.getOffHandItem())) {
             event.setCancelled(true);
         }
     }
@@ -227,6 +393,22 @@ public class ShulkerListener implements Listener {
             manager.closeShulker(player, true);
         } else if (manager.isLoading(player)) {
             manager.cancelLoading(player);
+        }
+    }
+
+    @EventHandler(priority = EventPriority.LOWEST)
+    public void onItemHeldChange(PlayerItemHeldEvent event) {
+        Player player = event.getPlayer();
+
+        if (!manager.hasOpenShulker(player)) {
+            return;
+        }
+
+        ItemStack newItem = player.getInventory().getItem(event.getNewSlot());
+        ItemStack oldItem = player.getInventory().getItem(event.getPreviousSlot());
+
+        if (manager.isOpenedShulker(player, newItem) || manager.isOpenedShulker(player, oldItem)) {
+            event.setCancelled(true);
         }
     }
 
