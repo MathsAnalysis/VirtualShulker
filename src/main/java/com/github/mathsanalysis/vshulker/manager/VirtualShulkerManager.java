@@ -4,7 +4,6 @@ import com.github.mathsanalysis.vshulker.VirtualShulkerPlugin;
 import com.github.mathsanalysis.vshulker.config.Config;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
-import net.kyori.adventure.text.format.TextDecoration;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.Material;
@@ -105,12 +104,16 @@ public final class VirtualShulkerManager {
             ItemStack currentShulker = getCurrentShulkerInSlot(player, session.slot);
 
             if (currentShulker == null || !isShulkerBox(currentShulker)) {
+                String reason = currentShulker == null ? "Shulker disappeared" : "Not a shulker box";
+
                 plugin.getLogger().severe("═══════════════════════════════════════════════");
                 plugin.getLogger().severe("ANTI-DUPE: Shulker disappeared/invalid");
                 plugin.getLogger().severe("Player: " + player.getName());
                 plugin.getLogger().severe("Slot: " + session.slot);
-                plugin.getLogger().severe("Action: BLOCK SAVE - NO DUPLICATION ALLOWED");
+                plugin.getLogger().severe("ACTION: Blocking save");
                 plugin.getLogger().severe("═══════════════════════════════════════════════");
+
+                notifyAdmins(player, reason);
 
                 player.sendMessage(Component.text("Session closed: Shulker was moved!", NamedTextColor.RED));
                 player.sendMessage(Component.text("Changes NOT saved!", NamedTextColor.GOLD));
@@ -118,14 +121,19 @@ public final class VirtualShulkerManager {
             }
 
             if (!isSameShulker(currentShulker, session.originalShulker)) {
+                String reason = "Shulker replaced (original: " + session.originalShulker.getType() +
+                        ", current: " + currentShulker.getType() + ")";
+
                 plugin.getLogger().severe("═══════════════════════════════════════════════");
                 plugin.getLogger().severe("ANTI-DUPE: Shulker was replaced");
                 plugin.getLogger().severe("Player: " + player.getName());
                 plugin.getLogger().severe("Slot: " + session.slot);
                 plugin.getLogger().severe("Original: " + session.originalShulker.getType());
                 plugin.getLogger().severe("Current: " + currentShulker.getType());
-                plugin.getLogger().severe("Action: BLOCK SAVE - NO DUPLICATION ALLOWED");
+                plugin.getLogger().severe("ACTION: Blocking save");
                 plugin.getLogger().severe("═══════════════════════════════════════════════");
+
+                notifyAdmins(player, reason);
 
                 player.sendMessage(Component.text("Session closed: Shulker was replaced!", NamedTextColor.RED));
                 player.sendMessage(Component.text("Changes NOT saved!", NamedTextColor.GOLD));
@@ -197,7 +205,18 @@ public final class VirtualShulkerManager {
         ItemStack currentShulker = getCurrentShulkerInSlot(player, session.slot);
 
         if (currentShulker == null || !isShulkerBox(currentShulker) || !isSameShulker(currentShulker, session.originalShulker)) {
-            plugin.getLogger().severe("IMMEDIATE VALIDATION FAILED - Closing session for " + player.getName());
+            String reason = currentShulker == null ? "Shulker NULL" :
+                    !isShulkerBox(currentShulker) ? "Not a shulker" :
+                            "Shulker replaced";
+
+            plugin.getLogger().severe("═══════════════════════════════════════════════");
+            plugin.getLogger().severe("IMMEDIATE VALIDATION FAILED");
+            plugin.getLogger().severe("Player: " + player.getName());
+            plugin.getLogger().severe("Reason: " + reason);
+            plugin.getLogger().severe("ACTION: Closing session without save");
+            plugin.getLogger().severe("═══════════════════════════════════════════════");
+
+            notifyAdmins(player, reason);
 
             activeSessions.remove(playerId);
             player.closeInventory();
@@ -232,26 +251,49 @@ public final class VirtualShulkerManager {
             }
 
             if (manipulated) {
+                plugin.getLogger().severe("═══════════════════════════════════════════════");
+                plugin.getLogger().severe("ANTI-DUPE SYSTEM TRIGGERED");
+                plugin.getLogger().severe("═══════════════════════════════════════════════");
+                plugin.getLogger().severe("Player: " + player.getName() + " (UUID: " + player.getUniqueId() + ")");
+                plugin.getLogger().severe("Reason: " + reason);
+                plugin.getLogger().severe("Slot Type: " + session.slot.type);
+                plugin.getLogger().severe("Slot Index: " + session.slot.slotIndex);
+                plugin.getLogger().severe("Location: " + player.getLocation().getBlockX() + ", " +
+                        player.getLocation().getBlockY() + ", " +
+                        player.getLocation().getBlockZ());
+                plugin.getLogger().severe("World: " + player.getWorld().getName());
+                plugin.getLogger().severe("═══════════════════════════════════════════════");
+                plugin.getLogger().severe("ACTION: Closing session without save");
+                plugin.getLogger().severe("═══════════════════════════════════════════════");
+
                 activeSessions.remove(entry.getKey());
 
+                notifyAdmins(player, reason);
+
                 String finalReason = reason;
+                Bukkit.getScheduler().runTask(plugin, () -> {
+                    player.closeInventory();
+                    player.sendMessage(Component.text("ANTI-DUPE: Manipulation detected!", NamedTextColor.DARK_RED));
+                    player.sendMessage(Component.text("Reason: " + finalReason, NamedTextColor.RED));
+                    player.sendMessage(Component.text("Changes NOT saved!", NamedTextColor.GOLD));
+                });
+            }
+        }
+    }
 
-                Component text = Component.text("════════════════════════", NamedTextColor.RED).decorate(TextDecoration.STRIKETHROUGH)
-                        .append(Component.newline())
-                        .append(Component.text("MANIPULATION DETECTED: " + finalReason, NamedTextColor.RED))
-                        .append(Component.text("Player: " + player.getName(), NamedTextColor.RED))
-                        .append(Component.text("Slot: " + session.slot, NamedTextColor.RED))
-                        .append(Component.text("Action: FORCE CLOSE WITHOUT SAVE", NamedTextColor.RED))
-                        .append(Component.newline())
-                        .append(Component.text("════════════════════════", NamedTextColor.RED).decorate(TextDecoration.STRIKETHROUGH));
+    private void notifyAdmins(Player violator, String reason) {
+        Component adminMessage = Component.text()
+                .append(Component.text("[ANTI-DUPE] ", NamedTextColor.DARK_RED))
+                .append(Component.text(violator.getName(), NamedTextColor.RED))
+                .append(Component.text(" attempted duplication!", NamedTextColor.YELLOW))
+                .append(Component.newline())
+                .append(Component.text("Reason: ", NamedTextColor.GRAY))
+                .append(Component.text(reason, NamedTextColor.WHITE))
+                .build();
 
-                for (Player allPlayers : Bukkit.getOnlinePlayers()) {
-                    if (allPlayers.hasPermission("virtualshulker.admin")) {
-                         allPlayers.sendMessage(text);
-                    }
-                }
-
-                Bukkit.getScheduler().runTask(plugin, () -> player.closeInventory());
+        for (Player online : Bukkit.getOnlinePlayers()) {
+            if (online.hasPermission(Config.PERMISSION_ADMIN)) {
+                online.sendMessage(adminMessage);
             }
         }
     }
