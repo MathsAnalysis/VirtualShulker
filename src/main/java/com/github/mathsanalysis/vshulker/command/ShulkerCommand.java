@@ -13,24 +13,25 @@ import revxrsal.commands.annotation.Subcommand;
 import revxrsal.commands.bukkit.annotation.CommandPermission;
 
 @Command("virtualshulker")
+@CommandPermission("virtualshulker.command.use")
 public record ShulkerCommand(VirtualShulkerPlugin plugin) {
 
     @Subcommand("reload")
-    @CommandPermission("virtualshulker.admin")
+    @CommandPermission("virtualshulker.command.reload")
     public void reload(CommandSender sender) {
         plugin.reload();
         sender.sendMessage(Config.getMessageReload());
     }
 
     @Subcommand("debug")
-    @CommandPermission("virtualshulker.admin")
+    @CommandPermission("virtualshulker.command.debug")
     public void debug(CommandSender sender, @Optional Player target) {
         if (target == null && sender instanceof Player) {
             target = (Player) sender;
         }
 
         if (target == null) {
-            sender.sendMessage(Component.text("Utilizzo: /virtualshulker debug <player>", NamedTextColor.RED));
+            sender.sendMessage(Component.text("Usage: /virtualshulker debug <player>", NamedTextColor.RED));
             return;
         }
 
@@ -39,30 +40,30 @@ public record ShulkerCommand(VirtualShulkerPlugin plugin) {
         sender.sendMessage(Component.text("╔═══════════════════════════════════════╗", NamedTextColor.GOLD));
         sender.sendMessage(Component.text("║  DEBUG INFO: " + target.getName(), NamedTextColor.GOLD));
         sender.sendMessage(Component.text("╠═══════════════════════════════════════╣", NamedTextColor.GOLD));
-        sender.sendMessage(Component.text("  Shulker aperto: " + manager.hasOpenShulker(target), NamedTextColor.YELLOW));
-        sender.sendMessage(Component.text("  In caricamento: " + manager.isLoading(target), NamedTextColor.YELLOW));
+        sender.sendMessage(Component.text("  Shulker open: " + manager.hasOpenShulker(target), NamedTextColor.YELLOW));
+        sender.sendMessage(Component.text("  Loading: " + manager.isLoading(target), NamedTextColor.YELLOW));
         sender.sendMessage(Component.text("╚═══════════════════════════════════════╝", NamedTextColor.GOLD));
     }
 
     @Subcommand("cleanup")
-    @CommandPermission("virtualshulker.admin")
+    @CommandPermission("virtualshulker.command.cleanup")
     public void cleanup(CommandSender sender, @Optional Player target) {
         if (target == null && sender instanceof Player) {
             target = (Player) sender;
         }
 
         if (target == null) {
-            sender.sendMessage(Component.text("Utilizzo: /virtualshulker cleanup <player>", NamedTextColor.RED));
+            sender.sendMessage(Component.text("Usage: /virtualshulker cleanup <player>", NamedTextColor.RED));
             return;
         }
 
-        sender.sendMessage(Component.text("⚠ Pulizia stato per " + target.getName() + "...", NamedTextColor.YELLOW));
+        sender.sendMessage(Component.text("⚠ Cleaning state for " + target.getName() + "...", NamedTextColor.YELLOW));
         plugin.getManager().forceCleanupPlayer(target);
-        sender.sendMessage(Component.text("✓ Pulizia completata!", NamedTextColor.GREEN));
+        sender.sendMessage(Component.text("✓ Cleanup completed!", NamedTextColor.GREEN));
     }
 
     @Subcommand("stats")
-    @CommandPermission("virtualshulker.admin")
+    @CommandPermission("virtualshulker.command.stats")
     public void stats(CommandSender sender) {
         var manager = plugin.getManager();
 
@@ -76,31 +77,32 @@ public record ShulkerCommand(VirtualShulkerPlugin plugin) {
         sender.sendMessage(Component.text("╔═══════════════════════════════════════╗", NamedTextColor.GOLD));
         sender.sendMessage(Component.text("║    VIRTUALSHULKER STATISTICS         ║", NamedTextColor.GOLD));
         sender.sendMessage(Component.text("╠═══════════════════════════════════════╣", NamedTextColor.GOLD));
-        sender.sendMessage(Component.text("  Giocatori online: " + Bukkit.getOnlinePlayers().size(), NamedTextColor.YELLOW));
-        sender.sendMessage(Component.text("  Sessioni attive: " + playersWithSessions, NamedTextColor.YELLOW));
-        sender.sendMessage(Component.text("  Sistema: NBT-ONLY (Direct Save)", NamedTextColor.GREEN));
+        sender.sendMessage(Component.text("  Online players: " + Bukkit.getOnlinePlayers().size(), NamedTextColor.YELLOW));
+        sender.sendMessage(Component.text("  Active sessions: " + playersWithSessions, NamedTextColor.YELLOW));
+        sender.sendMessage(Component.text("  System: NBT-ONLY (Direct Save)", NamedTextColor.GREEN));
         sender.sendMessage(Component.text("  Database: NONE", NamedTextColor.GREEN));
         sender.sendMessage(Component.text("  Cache: NONE", NamedTextColor.GREEN));
         sender.sendMessage(Component.text("╚═══════════════════════════════════════╝", NamedTextColor.GOLD));
     }
 
     @Subcommand("help")
+    @CommandPermission("virtualshulker.command.help")
     public void help(CommandSender sender) {
         sender.sendMessage(Component.text("╔═══════════════════════════════════════╗", NamedTextColor.GOLD));
         sender.sendMessage(Component.text("║      VIRTUALSHULKER COMMANDS         ║", NamedTextColor.GOLD));
         sender.sendMessage(Component.text("╠═══════════════════════════════════════╣", NamedTextColor.GOLD));
         sender.sendMessage(Component.text("  /vs reload", NamedTextColor.YELLOW)
-                .append(Component.text(" - Ricarica il plugin", NamedTextColor.GRAY)));
+                .append(Component.text(" - Reload the plugin", NamedTextColor.GRAY)));
         sender.sendMessage(Component.text("  /vs debug [player]", NamedTextColor.YELLOW)
-                .append(Component.text(" - Info debug", NamedTextColor.GRAY)));
+                .append(Component.text(" - Debug information", NamedTextColor.GRAY)));
         sender.sendMessage(Component.text("  /vs cleanup [player]", NamedTextColor.YELLOW)
-                .append(Component.text(" - Pulizia forzata", NamedTextColor.GRAY)));
+                .append(Component.text(" - Force cleanup", NamedTextColor.GRAY)));
         sender.sendMessage(Component.text("  /vs stats", NamedTextColor.YELLOW)
-                .append(Component.text(" - Statistiche sistema", NamedTextColor.GRAY)));
+                .append(Component.text(" - System statistics", NamedTextColor.GRAY)));
         sender.sendMessage(Component.text("  /vs help", NamedTextColor.YELLOW)
-                .append(Component.text(" - Mostra questo menu", NamedTextColor.GRAY)));
+                .append(Component.text(" - Show this menu", NamedTextColor.GRAY)));
         sender.sendMessage(Component.text("╠═══════════════════════════════════════╣", NamedTextColor.GOLD));
-        sender.sendMessage(Component.text("  Sistema: Salvataggio DIRETTO NBT", NamedTextColor.GREEN));
+        sender.sendMessage(Component.text("  System: DIRECT NBT Save", NamedTextColor.GREEN));
         sender.sendMessage(Component.text("╚═══════════════════════════════════════╝", NamedTextColor.GOLD));
     }
 }

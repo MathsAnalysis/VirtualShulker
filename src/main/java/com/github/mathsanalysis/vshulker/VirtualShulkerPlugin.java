@@ -58,14 +58,11 @@ public final class VirtualShulkerPlugin extends JavaPlugin {
         if (manager != null) {
             manager.shutdown();
         }
-
-        getLogger().info("VirtualShulker disabled");
     }
 
     public void reload() {
         reloadConfig();
         Config.load(this);
-        getLogger().info("VirtualShulker reloaded");
     }
 
     public static VirtualShulkerPlugin getInstance() {
