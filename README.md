@@ -23,7 +23,7 @@ VirtualShulker is a Java-based project providing innovative features for virtual
 
 ## Usage
 
-After setup, VirtualShulker allows players to access a virtual shulker box via specific plugin commands or custom graphical interfaces. Configuration and documentation for commands can be found in the [wiki](./wiki) (if available) or directly in the source code.
+After setup, VirtualShulker allows players to access a virtual shulker box via specific plugin commands or custom graphical interfaces. Configuration and documentation for commands can be found in the [wiki](https://github.com/MathsAnalysis/VirtualShulker/wiki) (if available) or directly in the source code.
 
 ## Contributing
 
