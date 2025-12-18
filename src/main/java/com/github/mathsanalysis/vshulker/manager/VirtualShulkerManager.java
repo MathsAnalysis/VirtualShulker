@@ -2,6 +2,10 @@ package com.github.mathsanalysis.vshulker.manager;
 
 import com.github.mathsanalysis.vshulker.VirtualShulkerPlugin;
 import com.github.mathsanalysis.vshulker.config.Config;
+import com.github.mathsanalysis.vshulker.security.NBTValidator;
+import com.github.mathsanalysis.vshulker.security.TransactionTracker;
+import com.github.mathsanalysis.vshulker.security.InventorySnapshot;
+import com.github.mathsanalysis.vshulker.security.ValidationResult;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import org.bukkit.Bukkit;
@@ -21,18 +25,26 @@ public final class VirtualShulkerManager {
     private static VirtualShulkerManager instance;
 
     private final VirtualShulkerPlugin plugin;
-
     private final Map<UUID, ShulkerSession> activeSessions;
-
     private final Set<UUID> loadingPlayers;
-
     private final Set<Location> placedShulkerLocations;
+    private final TransactionTracker transactionTracker;
+    private final InventorySnapshot inventorySnapshot;
+    private final Map<UUID, Long> lastOpenTime;
+    private final Map<UUID, Integer> autoSaveScheduled;
+
+    private static final long OPEN_COOLDOWN_MS = 200;
+    private static final int AUTO_SAVE_DELAY_TICKS = 2;
 
     public VirtualShulkerManager(VirtualShulkerPlugin plugin) {
         this.plugin = plugin;
         this.activeSessions = new ConcurrentHashMap<>();
         this.loadingPlayers = ConcurrentHashMap.newKeySet();
         this.placedShulkerLocations = ConcurrentHashMap.newKeySet();
+        this.transactionTracker = new TransactionTracker();
+        this.inventorySnapshot = new InventorySnapshot();
+        this.lastOpenTime = new ConcurrentHashMap<>();
+        this.autoSaveScheduled = new ConcurrentHashMap<>();
     }
 
     public static VirtualShulkerManager getInstance(VirtualShulkerPlugin plugin) {
@@ -43,7 +55,17 @@ public final class VirtualShulkerManager {
     }
 
     public void initialize() {
-        plugin.getLogger().info("VirtualShulkerManager initialized (NBT-only, NO ID system)");
+        plugin.getLogger().info("═══════════════════════════════════════════════");
+        plugin.getLogger().info("VirtualShulkerManager initialized");
+        plugin.getLogger().info("Mode: MAXIMUM SECURITY");
+        plugin.getLogger().info("Features:");
+        plugin.getLogger().info("  ✓ Transaction Tracking");
+        plugin.getLogger().info("  ✓ NBT Validation");
+        plugin.getLogger().info("  ✓ Rate Limiting");
+        plugin.getLogger().info("  ✓ Packet Desync Prevention");
+        plugin.getLogger().info("  ✓ Continuous Validation");
+        plugin.getLogger().info("  ✓ Multi-point Saving");
+        plugin.getLogger().info("═══════════════════════════════════════════════");
     }
 
     public void openShulker(Player player, ItemStack shulkerBox) {
@@ -52,6 +74,11 @@ public final class VirtualShulkerManager {
         }
 
         UUID playerId = player.getUniqueId();
+
+        if (!checkOpenCooldown(playerId)) {
+            player.sendMessage(Component.text("Please wait before opening another shulker!", NamedTextColor.RED));
+            return;
+        }
 
         if (activeSessions.containsKey(playerId)) {
             player.sendMessage(Component.text("You already have a shulker open!", NamedTextColor.YELLOW));
@@ -63,7 +90,24 @@ public final class VirtualShulkerManager {
             return;
         }
 
+        ValidationResult validation = NBTValidator.validate(shulkerBox);
+        if (!validation.isValid()) {
+            plugin.getLogger().severe("═══════════════════════════════════════════════");
+            plugin.getLogger().severe("NBT VALIDATION FAILED");
+            plugin.getLogger().severe("Player: " + player.getName());
+            plugin.getLogger().severe("Reason: " + validation.getReason());
+            plugin.getLogger().severe("ACTION: Open blocked, shulker sanitized");
+            plugin.getLogger().severe("═══════════════════════════════════════════════");
+
+            player.sendMessage(Component.text("This shulker contains invalid data!", NamedTextColor.RED));
+            player.sendMessage(Component.text("Reason: " + validation.getReason(), NamedTextColor.GRAY));
+
+            notifyAdmins(player, "Invalid NBT: " + validation.getReason());
+            return;
+        }
+
         loadingPlayers.add(playerId);
+        lastOpenTime.put(playerId, System.currentTimeMillis());
 
         try {
             ShulkerSlot slot = findShulkerSlot(player, shulkerBox);
@@ -75,11 +119,29 @@ public final class VirtualShulkerManager {
             }
 
             ItemStack[] contents = getContentsFromNBT(shulkerBox);
+            
+            ValidationResult contentsValidation = NBTValidator.validateInventory(contents);
+            if (!contentsValidation.isValid()) {
+                plugin.getLogger().severe("Shulker contents validation failed: " + contentsValidation.getReason());
+                player.sendMessage(Component.text("Shulker contains invalid items!", NamedTextColor.RED));
+                return;
+            }
 
             Inventory inventory = createInventory(contents);
 
-            ShulkerSession session = new ShulkerSession(inventory, slot, shulkerBox.clone());
+            transactionTracker.createCheckpoint(player, contents);
+
+            inventorySnapshot.createSnapshot(player, contents);
+
+            ShulkerSession session = new ShulkerSession(
+                    inventory,
+                    slot,
+                    shulkerBox.clone(),
+                    System.currentTimeMillis()
+            );
             activeSessions.put(playerId, session);
+
+            transactionTracker.recordTransaction(player, TransactionTracker.TransactionType.OPEN, -1, shulkerBox);
 
             player.openInventory(inventory);
 
@@ -91,64 +153,167 @@ public final class VirtualShulkerManager {
     }
 
     public void closeShulker(Player player, boolean save) {
+        closeShulker(player, save, false);
+    }
+
+    public void closeShulker(Player player, boolean save, boolean scheduled) {
         UUID playerId = player.getUniqueId();
 
         ShulkerSession session = activeSessions.remove(playerId);
         loadingPlayers.remove(playerId);
 
+        Integer taskId = autoSaveScheduled.remove(playerId);
+        if (taskId != null) {
+            Bukkit.getScheduler().cancelTask(taskId);
+        }
+
         if (session == null) {
             return;
         }
 
+        transactionTracker.recordTransaction(player, TransactionTracker.TransactionType.CLOSE, -1, null);
+
         if (save) {
-            ItemStack currentShulker = getCurrentShulkerInSlot(player, session.slot);
-
-            if (currentShulker == null || !isShulkerBox(currentShulker)) {
-                String reason = currentShulker == null ? "Shulker disappeared" : "Not a shulker box";
-
-                plugin.getLogger().severe("═══════════════════════════════════════════════");
-                plugin.getLogger().severe("ANTI-DUPE: Shulker disappeared/invalid");
-                plugin.getLogger().severe("Player: " + player.getName());
-                plugin.getLogger().severe("Slot: " + session.slot);
-                plugin.getLogger().severe("ACTION: Blocking save");
-                plugin.getLogger().severe("═══════════════════════════════════════════════");
-
-                notifyAdmins(player, reason);
-
-                player.sendMessage(Component.text("Session closed: Shulker was moved!", NamedTextColor.RED));
-                player.sendMessage(Component.text("Changes NOT saved!", NamedTextColor.GOLD));
+            if (!scheduled) {
+                Bukkit.getScheduler().runTask(plugin, () -> performSave(player, session));
                 return;
             }
 
-            if (!isSameShulker(currentShulker, session.originalShulker)) {
-                String reason = "Shulker replaced (original: " + session.originalShulker.getType() +
-                        ", current: " + currentShulker.getType() + ")";
-
-                plugin.getLogger().severe("═══════════════════════════════════════════════");
-                plugin.getLogger().severe("ANTI-DUPE: Shulker was replaced");
-                plugin.getLogger().severe("Player: " + player.getName());
-                plugin.getLogger().severe("Slot: " + session.slot);
-                plugin.getLogger().severe("Original: " + session.originalShulker.getType());
-                plugin.getLogger().severe("Current: " + currentShulker.getType());
-                plugin.getLogger().severe("ACTION: Blocking save");
-                plugin.getLogger().severe("═══════════════════════════════════════════════");
-
-                notifyAdmins(player, reason);
-
-                player.sendMessage(Component.text("Session closed: Shulker was replaced!", NamedTextColor.RED));
-                player.sendMessage(Component.text("Changes NOT saved!", NamedTextColor.GOLD));
-                return;
-            }
-
-            ItemStack[] contents = session.inventory.getContents();
-            updateShulkerInSlot(player, session.slot, contents);
-
-            plugin.getLogger().fine("Saved shulker for " + player.getName() + " to slot: " + session.slot);
+            performSave(player, session);
+        } else {
+            plugin.getLogger().info("Shulker closed without save for " + player.getName());
         }
     }
 
+    private void performSave(Player player, ShulkerSession session) {
+        UUID playerId = player.getUniqueId();
+
+        if (transactionTracker.detectSuspiciousActivity(player)) {
+            plugin.getLogger().severe("═══════════════════════════════════════════════");
+            plugin.getLogger().severe("SUSPICIOUS ACTIVITY DETECTED");
+            plugin.getLogger().severe("Player: " + player.getName());
+            plugin.getLogger().severe("ACTION: Save blocked");
+            plugin.getLogger().severe("═══════════════════════════════════════════════");
+
+            notifyAdmins(player, "Suspicious transaction pattern detected");
+            player.sendMessage(Component.text("ANTI-DUPE: Unusual activity detected!", NamedTextColor.DARK_RED));
+            player.sendMessage(Component.text("Changes NOT saved!", NamedTextColor.GOLD));
+            return;
+        }
+
+        ItemStack currentShulker = getCurrentShulkerInSlot(player, session.slot);
+
+        if (currentShulker == null || !isShulkerBox(currentShulker)) {
+            String reason = currentShulker == null ? "Shulker disappeared" : "Not a shulker box";
+
+            plugin.getLogger().severe("═══════════════════════════════════════════════");
+            plugin.getLogger().severe("ANTI-DUPE: Shulker disappeared/invalid");
+            plugin.getLogger().severe("Player: " + player.getName());
+            plugin.getLogger().severe("Slot: " + session.slot);
+            plugin.getLogger().severe("Session Duration: " + (System.currentTimeMillis() - session.openTimestamp) + "ms");
+            plugin.getLogger().severe("ACTION: Blocking save");
+            plugin.getLogger().severe("═══════════════════════════════════════════════");
+
+            notifyAdmins(player, reason);
+
+            player.sendMessage(Component.text("Session closed: Shulker was moved!", NamedTextColor.RED));
+            player.sendMessage(Component.text("Changes NOT saved!", NamedTextColor.GOLD));
+            return;
+        }
+
+        if (!isSameShulker(currentShulker, session.originalShulker)) {
+            String reason = "Shulker replaced (original: " + session.originalShulker.getType() +
+                    ", current: " + currentShulker.getType() + ")";
+
+            plugin.getLogger().severe("═══════════════════════════════════════════════");
+            plugin.getLogger().severe("ANTI-DUPE: Shulker was replaced");
+            plugin.getLogger().severe("Player: " + player.getName());
+            plugin.getLogger().severe("Slot: " + session.slot);
+            plugin.getLogger().severe("Original: " + session.originalShulker.getType());
+            plugin.getLogger().severe("Current: " + currentShulker.getType());
+            plugin.getLogger().severe("ACTION: Blocking save");
+            plugin.getLogger().severe("═══════════════════════════════════════════════");
+
+            notifyAdmins(player, reason);
+
+            player.sendMessage(Component.text("Session closed: Shulker was replaced!", NamedTextColor.RED));
+            player.sendMessage(Component.text("Changes NOT saved!", NamedTextColor.GOLD));
+            return;
+        }
+
+        ItemStack[] contents = session.inventory.getContents();
+
+        ValidationResult snapshotValidation = inventorySnapshot.validateAgainstSnapshot(player, contents);
+        if (!snapshotValidation.isValid()) {
+            plugin.getLogger().severe("═══════════════════════════════════════════════");
+            plugin.getLogger().severe("ANTI-DUPE: Inventory manipulation detected");
+            plugin.getLogger().severe("Player: " + player.getName());
+            plugin.getLogger().severe("Reason: " + snapshotValidation.getReason());
+            plugin.getLogger().severe("Detection: UIUtils copy-paste exploit");
+            plugin.getLogger().severe("ACTION: Blocking save");
+            plugin.getLogger().severe("═══════════════════════════════════════════════");
+
+            notifyAdmins(player, "Copy-paste manipulation: " + snapshotValidation.getReason());
+            player.sendMessage(Component.text("ANTI-DUPE: Inventory manipulation detected!", NamedTextColor.DARK_RED));
+            player.sendMessage(Component.text("Changes NOT saved!", NamedTextColor.GOLD));
+            return;
+        }
+
+        ItemStack[] originalContents = transactionTracker.getCheckpoint(player);
+        if (originalContents != null) {
+            ValidationResult modificationCheck = inventorySnapshot.detectImpossibleModifications(
+                    player, originalContents, contents);
+
+            if (!modificationCheck.isValid()) {
+                plugin.getLogger().severe("═══════════════════════════════════════════════");
+                plugin.getLogger().severe("ANTI-DUPE: Impossible modification detected");
+                plugin.getLogger().severe("Player: " + player.getName());
+                plugin.getLogger().severe("Reason: " + modificationCheck.getReason());
+                plugin.getLogger().severe("ACTION: Blocking save");
+                plugin.getLogger().severe("═══════════════════════════════════════════════");
+
+                notifyAdmins(player, "Impossible modification: " + modificationCheck.getReason());
+                player.sendMessage(Component.text("ANTI-DUPE: Impossible changes detected!", NamedTextColor.DARK_RED));
+                player.sendMessage(Component.text("Changes NOT saved!", NamedTextColor.GOLD));
+                return;
+            }
+        }
+
+        ValidationResult validation = NBTValidator.validateInventory(contents);
+        if (!validation.isValid()) {
+            plugin.getLogger().severe("═══════════════════════════════════════════════");
+            plugin.getLogger().severe("ANTI-DUPE: Invalid contents on save");
+            plugin.getLogger().severe("Player: " + player.getName());
+            plugin.getLogger().severe("Reason: " + validation.getReason());
+            plugin.getLogger().severe("ACTION: Blocking save, rolling back to checkpoint");
+            plugin.getLogger().severe("═══════════════════════════════════════════════");
+
+            notifyAdmins(player, "Invalid NBT on save: " + validation.getReason());
+            player.sendMessage(Component.text("ANTI-DUPE: Invalid data detected!", NamedTextColor.DARK_RED));
+            player.sendMessage(Component.text("Changes NOT saved!", NamedTextColor.GOLD));
+            return;
+        }
+
+        updateShulkerInSlot(player, session.slot, contents);
+
+        plugin.getLogger().fine("Saved shulker for " + player.getName() + " to slot: " + session.slot);
+
+        transactionTracker.clearPlayer(playerId);
+        inventorySnapshot.clearSnapshot(playerId);
+    }
+
+    private boolean checkOpenCooldown(UUID playerId) {
+        Long lastTime = lastOpenTime.get(playerId);
+        if (lastTime == null) {
+            return true;
+        }
+
+        long timeSinceLastOpen = System.currentTimeMillis() - lastTime;
+        return timeSinceLastOpen >= OPEN_COOLDOWN_MS;
+    }
+
     public boolean isOpenedShulker(Player player, ItemStack item) {
-        if (item == null || !isShulkerBox(item)) {
+        if (!isShulkerBox(item)) {
             return false;
         }
 
@@ -160,19 +325,20 @@ public final class VirtualShulkerManager {
         return isSameShulker(item, session.originalShulker);
     }
 
-    public boolean isOpenedShulkerInInventory(Player player) {
-        ShulkerSession session = activeSessions.get(player.getUniqueId());
-        if (session == null) {
-            return false;
+    public void scheduleAutoSave(Player player) {
+        UUID playerId = player.getUniqueId();
+
+        Integer existingTask = autoSaveScheduled.get(playerId);
+        if (existingTask != null) {
+            Bukkit.getScheduler().cancelTask(existingTask);
         }
 
-        return session.slot.type == SlotType.MAIN_HAND ||
-                session.slot.type == SlotType.OFF_HAND ||
-                session.slot.type == SlotType.INVENTORY;
-    }
+        int taskId = Bukkit.getScheduler().runTaskLater(plugin, () -> {
+            performAutoSave(player);
+            autoSaveScheduled.remove(playerId);
+        }, AUTO_SAVE_DELAY_TICKS).getTaskId();
 
-    public void scheduleAutoSave(Player player) {
-        performAutoSave(player);
+        autoSaveScheduled.put(playerId, taskId);
     }
 
     private void performAutoSave(Player player) {
@@ -191,7 +357,24 @@ public final class VirtualShulkerManager {
         }
 
         ItemStack[] contents = session.inventory.getContents();
+
+        ValidationResult snapshotValidation = inventorySnapshot.validateAgainstSnapshot(player, contents);
+        if (!snapshotValidation.isValid()) {
+            plugin.getLogger().warning("AUTO-SAVE BLOCKED: Inventory manipulation - " + snapshotValidation.getReason());
+            return;
+        }
+
+        ValidationResult validation = NBTValidator.validateInventory(contents);
+        if (!validation.isValid()) {
+            plugin.getLogger().warning("AUTO-SAVE BLOCKED: Invalid contents for " + player.getName());
+            return;
+        }
+
         updateShulkerInSlot(player, session.slot, contents);
+    }
+
+    public boolean recordTransaction(Player player, TransactionTracker.TransactionType type, int slot, ItemStack item) {
+        return transactionTracker.recordTransaction(player, type, slot, item);
     }
 
     public void performImmediateValidation(Player player) {
@@ -213,15 +396,20 @@ public final class VirtualShulkerManager {
             plugin.getLogger().severe("IMMEDIATE VALIDATION FAILED");
             plugin.getLogger().severe("Player: " + player.getName());
             plugin.getLogger().severe("Reason: " + reason);
-            plugin.getLogger().severe("ACTION: Closing session without save");
+            plugin.getLogger().severe("ACTION: Closing session without save, scheduling close");
             plugin.getLogger().severe("═══════════════════════════════════════════════");
 
             notifyAdmins(player, reason);
 
             activeSessions.remove(playerId);
-            player.closeInventory();
-            player.sendMessage(Component.text("ANTI-DUPE: Manipulation detected!", NamedTextColor.DARK_RED));
-            player.sendMessage(Component.text("Changes NOT saved!", NamedTextColor.GOLD));
+
+            String finalReason = reason;
+            Bukkit.getScheduler().runTask(plugin, () -> {
+                player.closeInventory();
+                player.sendMessage(Component.text("ANTI-DUPE: Manipulation detected!", NamedTextColor.DARK_RED));
+                player.sendMessage(Component.text("Reason: " + finalReason, NamedTextColor.RED));
+                player.sendMessage(Component.text("Changes NOT saved!", NamedTextColor.GOLD));
+            });
         }
     }
 
@@ -258,12 +446,13 @@ public final class VirtualShulkerManager {
                 plugin.getLogger().severe("Reason: " + reason);
                 plugin.getLogger().severe("Slot Type: " + session.slot.type);
                 plugin.getLogger().severe("Slot Index: " + session.slot.slotIndex);
+                plugin.getLogger().severe("Session Age: " + (System.currentTimeMillis() - session.openTimestamp) + "ms");
                 plugin.getLogger().severe("Location: " + player.getLocation().getBlockX() + ", " +
                         player.getLocation().getBlockY() + ", " +
                         player.getLocation().getBlockZ());
                 plugin.getLogger().severe("World: " + player.getWorld().getName());
                 plugin.getLogger().severe("═══════════════════════════════════════════════");
-                plugin.getLogger().severe("ACTION: Closing session without save");
+                plugin.getLogger().severe("ACTION: Closing session without save (scheduled)");
                 plugin.getLogger().severe("═══════════════════════════════════════════════");
 
                 activeSessions.remove(entry.getKey());
@@ -318,7 +507,16 @@ public final class VirtualShulkerManager {
             }
 
             ItemStack[] contents = box.getInventory().getContents();
-            return contents != null ? contents : new ItemStack[27];
+
+            if (contents != null) {
+                ItemStack[] cloned = new ItemStack[contents.length];
+                for (int i = 0; i < contents.length; i++) {
+                    cloned[i] = contents[i] != null ? contents[i].clone() : null;
+                }
+                return cloned;
+            }
+
+            return new ItemStack[27];
 
         } catch (Exception e) {
             plugin.getLogger().warning("Error reading NBT contents: " + e.getMessage());
@@ -333,7 +531,13 @@ public final class VirtualShulkerManager {
             }
 
             ShulkerBox box = (ShulkerBox) blockMeta.getBlockState();
-            box.getInventory().setContents(contents);
+
+            ItemStack[] cloned = new ItemStack[contents.length];
+            for (int i = 0; i < contents.length; i++) {
+                cloned[i] = contents[i] != null ? contents[i].clone() : null;
+            }
+
+            box.getInventory().setContents(cloned);
 
             blockMeta.setBlockState(box);
             shulkerBox.setItemMeta(blockMeta);
@@ -447,6 +651,14 @@ public final class VirtualShulkerManager {
         UUID playerId = player.getUniqueId();
 
         loadingPlayers.remove(playerId);
+        lastOpenTime.remove(playerId);
+        transactionTracker.clearPlayer(playerId);
+        inventorySnapshot.clearSnapshot(playerId);
+
+        Integer taskId = autoSaveScheduled.remove(playerId);
+        if (taskId != null) {
+            Bukkit.getScheduler().cancelTask(taskId);
+        }
 
         ShulkerSession session = activeSessions.remove(playerId);
         if (session != null) {
@@ -482,11 +694,7 @@ public final class VirtualShulkerManager {
     private Inventory createInventory(ItemStack[] contents) {
         Component title = Config.getShulkerTitle();
         Inventory inventory = Bukkit.createInventory(null, Config.getShulkerSize(), title);
-
-        if (contents != null) {
-            inventory.setContents(contents);
-        }
-
+        inventory.setContents(contents);
         return inventory;
     }
 
@@ -509,7 +717,7 @@ public final class VirtualShulkerManager {
         for (Map.Entry<UUID, ShulkerSession> entry : new HashMap<>(activeSessions).entrySet()) {
             Player player = Bukkit.getPlayer(entry.getKey());
             if (player != null) {
-                closeShulker(player, true);
+                closeShulker(player, true, true);
                 closedSessions++;
             }
         }
@@ -518,14 +726,25 @@ public final class VirtualShulkerManager {
             plugin.getLogger().info("Closed " + closedSessions + " active sessions");
         }
 
+        for (Integer taskId : autoSaveScheduled.values()) {
+            Bukkit.getScheduler().cancelTask(taskId);
+        }
+
         activeSessions.clear();
         loadingPlayers.clear();
         placedShulkerLocations.clear();
+        lastOpenTime.clear();
+        autoSaveScheduled.clear();
 
         plugin.getLogger().info("VirtualShulkerManager shutdown complete");
     }
 
-    private record ShulkerSession(Inventory inventory, ShulkerSlot slot, ItemStack originalShulker) {}
+    private record ShulkerSession(
+            Inventory inventory,
+            ShulkerSlot slot,
+            ItemStack originalShulker,
+            long openTimestamp
+    ) {}
 
     private record ShulkerSlot(SlotType type, int slotIndex) {}
 

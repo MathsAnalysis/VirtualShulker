@@ -2,6 +2,7 @@ package com.github.mathsanalysis.vshulker.listener;
 
 import com.github.mathsanalysis.vshulker.VirtualShulkerPlugin;
 import com.github.mathsanalysis.vshulker.manager.VirtualShulkerManager;
+import org.bukkit.Bukkit;
 import org.bukkit.GameMode;
 import org.bukkit.Location;
 import org.bukkit.Material;
@@ -62,8 +63,19 @@ public class ShulkerBlockListener implements Listener {
             return;
         }
 
+        if (manager.isOpenedShulker(event.getPlayer(), item)) {
+            event.setCancelled(true);
+            event.getPlayer().sendMessage(net.kyori.adventure.text.Component.text(
+                    "Cannot place the opened shulker!",
+                    net.kyori.adventure.text.format.NamedTextColor.RED
+            ));
+            return;
+        }
+
         Location location = event.getBlock().getLocation();
         manager.registerPlacedShulker(location);
+
+        plugin.getLogger().fine("Registered placed shulker at: " + location);
     }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
@@ -73,8 +85,20 @@ public class ShulkerBlockListener implements Listener {
         }
 
         Location location = event.getBlock().getLocation();
-        manager.unregisterPlacedShulker(location);
 
+        if (manager.isPlacedVirtualShulker(location)) {
+            for (Player online : Bukkit.getOnlinePlayers()) {
+                if (manager.hasOpenShulker(online)) {
+                    Bukkit.getScheduler().runTask(plugin, () -> {
+                        manager.closeShulker(online, true, true);
+                        online.closeInventory();
+                    });
+                }
+            }
+        }
+
+        manager.unregisterPlacedShulker(location);
+        plugin.getLogger().fine("Unregistered placed shulker at: " + location);
     }
 
     @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = true)
@@ -145,6 +169,7 @@ public class ShulkerBlockListener implements Listener {
         for (Block block : event.getBlocks()) {
             if (SHULKER_BOXES.contains(block.getType()) && manager.isPlacedVirtualShulker(block.getLocation())) {
                 event.setCancelled(true);
+                plugin.getLogger().fine("Blocked piston extension of virtual shulker");
                 return;
             }
         }
@@ -155,6 +180,7 @@ public class ShulkerBlockListener implements Listener {
         for (Block block : event.getBlocks()) {
             if (SHULKER_BOXES.contains(block.getType()) && manager.isPlacedVirtualShulker(block.getLocation())) {
                 event.setCancelled(true);
+                plugin.getLogger().fine("Blocked piston retraction of virtual shulker");
                 return;
             }
         }
@@ -179,13 +205,16 @@ public class ShulkerBlockListener implements Listener {
 
         if (manager.hasOpenShulker(player)) {
             event.setCancelled(true);
+            player.sendMessage(net.kyori.adventure.text.Component.text(
+                    "Close your virtual shulker first!",
+                    net.kyori.adventure.text.format.NamedTextColor.RED
+            ));
             return;
         }
 
         if (player.isSneaking() && player.getInventory().getItemInMainHand().getType().isBlock()) {
             return;
         }
-
     }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
@@ -201,6 +230,20 @@ public class ShulkerBlockListener implements Listener {
 
         if (manager.hasOpenShulker(event.getPlayer())) {
             event.setCancelled(true);
+            event.getPlayer().sendMessage(net.kyori.adventure.text.Component.text(
+                    "Close your virtual shulker first!",
+                    net.kyori.adventure.text.format.NamedTextColor.RED
+            ));
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onBlockFromTo(BlockFromToEvent event) {
+        Block toBlock = event.getToBlock();
+        if (SHULKER_BOXES.contains(toBlock.getType())) {
+            if (manager.isPlacedVirtualShulker(toBlock.getLocation())) {
+                event.setCancelled(true);
+            }
         }
     }
 }
